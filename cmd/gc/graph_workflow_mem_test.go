@@ -25,6 +25,9 @@ func builtinFormulaDir(t *testing.T) string {
 func buildMemGraphWorkflowConfig(t *testing.T) *config.City {
 	t.Helper()
 	cfg := &config.City{
+		Daemon: config.DaemonConfig{
+			GraphWorkflows: true,
+		},
 		Workspace: config.Workspace{Name: "test-city"},
 		FormulaLayers: config.FormulaLayers{
 			City: []string{builtinFormulaDir(t)},
@@ -33,6 +36,8 @@ func buildMemGraphWorkflowConfig(t *testing.T) *config.City {
 			{Name: "worker"},
 		},
 	}
+	applyFeatureFlags(cfg)
+	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
 	config.InjectImplicitAgents(cfg)
 	return cfg
 }
@@ -386,6 +391,9 @@ func TestGraphWorkflowInMemoryCreateExecuteWaitFlow(t *testing.T) {
 	root := mustGetMemBead(t, store, workflowID)
 	if root.Metadata["gc.kind"] != "workflow" {
 		t.Fatalf("root gc.kind = %q, want workflow", root.Metadata["gc.kind"])
+	}
+	if root.Status != "in_progress" {
+		t.Fatalf("root status = %q, want in_progress", root.Status)
 	}
 	if root.Metadata["gc.source_bead_id"] != issueID {
 		t.Fatalf("root source_bead_id = %q, want %q", root.Metadata["gc.source_bead_id"], issueID)

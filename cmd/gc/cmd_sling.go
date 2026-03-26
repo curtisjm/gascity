@@ -1332,9 +1332,41 @@ func appendUniqueString(in []string, value string) []string {
 	return append(in, value)
 }
 
+func shouldPromoteWorkflowLaunchStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "", "open", "ready", "todo", "triage", "backlog":
+		return true
+	default:
+		return false
+	}
+}
+
+func promoteWorkflowLaunchBead(store beads.Store, beadID string) error {
+	beadID = strings.TrimSpace(beadID)
+	if beadID == "" {
+		return nil
+	}
+	bead, err := store.Get(beadID)
+	if err != nil {
+		return err
+	}
+	if !shouldPromoteWorkflowLaunchStatus(bead.Status) {
+		return nil
+	}
+	status := "in_progress"
+	return store.Update(beadID, beads.UpdateOpts{Status: &status})
+}
+
 func startGraphWorkflow(result *molecule.Result, sourceBeadID string, a config.Agent, method string, deps slingDeps) int {
 	rootID := result.RootID
 	slingTracef("workflow-start begin root=%s source=%s agent=%s method=%s", rootID, sourceBeadID, a.QualifiedName(), method)
+	statusStart := time.Now()
+	if err := promoteWorkflowLaunchBead(deps.Store, rootID); err != nil {
+		slingTracef("workflow-start root-status-error root=%s dur=%s err=%v", rootID, time.Since(statusStart), err)
+		fmt.Fprintf(deps.Stderr, "gc sling: setting workflow root %s in_progress: %v\n", rootID, err) //nolint:errcheck // best-effort
+		return 1
+	}
+	slingTracef("workflow-start root-status-done root=%s dur=%s", rootID, time.Since(statusStart))
 	if sourceBeadID != "" {
 		metaStart := time.Now()
 		if err := deps.Store.SetMetadata(sourceBeadID, "workflow_id", rootID); err != nil {

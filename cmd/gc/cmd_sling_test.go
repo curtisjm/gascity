@@ -1295,6 +1295,9 @@ func TestOnFormulaGraphWorkflowPreassignsNonLatchBeadsForFixedAgent(t *testing.T
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cfg.Daemon.GraphWorkflows = true
+	applyFeatureFlags(cfg)
+	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
 	cfg.FormulaLayers.City = []string{testFormulaDir(t)}
 	a := config.Agent{Name: "mayor"}
 
@@ -1332,6 +1335,9 @@ title = "Do work"
 	if err != nil {
 		t.Fatalf("get parent: %v", err)
 	}
+	if got := parent.Status; got != "open" {
+		t.Fatalf("parent status = %q, want open", got)
+	}
 	rootID := parent.Metadata["workflow_id"]
 	if rootID == "" {
 		t.Fatal("parent workflow_id missing")
@@ -1340,6 +1346,9 @@ title = "Do work"
 	root, err := deps.Store.Get(rootID)
 	if err != nil {
 		t.Fatalf("get workflow root: %v", err)
+	}
+	if got := root.Status; got != "in_progress" {
+		t.Fatalf("root status = %q, want in_progress", got)
 	}
 	if got := root.Metadata["gc.run_target"]; got != "mayor" {
 		t.Fatalf("root gc.run_target = %q, want mayor", got)
