@@ -196,6 +196,7 @@ func (s *Server) registerRoutes() {
 
 	// Beads
 	s.mux.HandleFunc("GET /v0/beads", s.handleBeadList)
+	s.mux.HandleFunc("GET /v0/beads/graph/{rootID}", s.handleBeadGraph)
 	s.mux.HandleFunc("GET /v0/beads/ready", s.handleBeadReady)
 	s.mux.HandleFunc("POST /v0/beads", s.handleBeadCreate)
 	s.mux.HandleFunc("GET /v0/bead/{id}", s.handleBeadGet)

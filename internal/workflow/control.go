@@ -447,8 +447,27 @@ func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error
 		}
 		// Also match short refs from nested retries inside ralphs where the
 		// step_ref is the bare child ID + ".attempt.N" (not fully namespaced).
-		// Extract the last path segment of the control's step_ref as an
-		// additional prefix to check.
+		// Try progressively shorter suffixes of the control's step_ref.
+		if !isAttempt {
+			// First: extract after ".iteration.N." for compose.expand children
+			// whose short refs include multi-segment IDs (e.g., "review-pipeline.review-codex").
+			for _, marker := range []string{".iteration.", ".attempt."} {
+				if idx := strings.LastIndex(controlRef, marker); idx >= 0 {
+					rest := controlRef[idx+len(marker):]
+					if dotIdx := strings.IndexByte(rest, '.'); dotIdx >= 0 {
+						childRef := rest[dotIdx+1:]
+						if childRef != "" {
+							isAttempt = strings.HasPrefix(ref, childRef+".attempt.") ||
+								strings.HasPrefix(ref, childRef+".iteration.")
+						}
+					}
+				}
+				if isAttempt {
+					break
+				}
+			}
+		}
+		// Fallback: last dot segment (handles single-segment child IDs).
 		if !isAttempt {
 			if lastDot := strings.LastIndex(controlRef, "."); lastDot >= 0 {
 				shortRef := controlRef[lastDot+1:]

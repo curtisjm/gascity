@@ -391,6 +391,74 @@ func sortedRigNames(stores map[string]beads.Store) []string {
 	return deduped
 }
 
+// beadGraphResponseJSON is the response shape for GET /v0/beads/graph/{rootID}.
+// Returns raw beads and deps — no status mapping, no presentation logic.
+type beadGraphResponseJSON struct {
+	Root  beads.Bead            `json:"root"`
+	Beads []beads.Bead          `json:"beads"`
+	Deps  []workflowDepResponse `json:"deps"`
+}
+
+func (s *Server) handleBeadGraph(w http.ResponseWriter, r *http.Request) {
+	rootID := r.PathValue("rootID")
+	if rootID == "" {
+		writeError(w, http.StatusBadRequest, "invalid", "rootID is required")
+		return
+	}
+
+	stores := s.state.BeadStores()
+
+	// Find root bead by scanning stores (bd handles prefix routing via routes.jsonl)
+	var root beads.Bead
+	var foundStore beads.Store
+	for _, rigName := range sortedRigNames(stores) {
+		store := stores[rigName]
+		b, err := store.Get(rootID)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		root = b
+		foundStore = store
+		break
+	}
+	if foundStore == nil {
+		writeError(w, http.StatusNotFound, "not_found", "bead "+rootID+" not found")
+		return
+	}
+
+	// Collect all beads in the graph: root + children where gc.root_bead_id == rootID
+	all, err := foundStore.List()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+
+	graphBeads := []beads.Bead{root}
+	beadIndex := map[string]beads.Bead{root.ID: root}
+	for _, b := range all {
+		if b.ID == root.ID {
+			continue
+		}
+		if b.Metadata != nil && b.Metadata["gc.root_bead_id"] == rootID {
+			graphBeads = append(graphBeads, b)
+			beadIndex[b.ID] = b
+		}
+	}
+
+	// Collect deps between graph beads (reuse existing dedup logic)
+	deps, _ := collectWorkflowDeps(foundStore, beadIndex)
+
+	writeIndexJSON(w, s.latestIndex(), beadGraphResponseJSON{
+		Root:  root,
+		Beads: graphBeads,
+		Deps:  deps,
+	})
+}
+
 // decodeBody decodes JSON request body into v.
 // Limits body size to 1 MiB to prevent OOM from oversized requests.
 func decodeBody(r *http.Request, v any) error {

@@ -78,8 +78,7 @@ func streamProjectedEventsWithWatcher(
 				return
 			}
 			data, err := json.Marshal(eventStreamEnvelope{
-				Event:    r.event,
-				Workflow: projectWorkflowEvent(state, r.event),
+				Event: r.event,
 			})
 			if err == nil {
 				writeSSE(w, r.event.Type, r.event.Seq, data)
@@ -134,16 +133,8 @@ func streamProjectedGlobalEvents(
 				return
 			}
 			cursors[r.event.City] = r.event.Seq
-			var workflow *workflowEventProjection
-			if state := resolver.CityState(r.event.City); state != nil {
-				// State implementations are required to be safe for concurrent
-				// reads; the controller serves API traffic and SSE projection from
-				// the same hot-reload snapshots.
-				workflow = projectWorkflowEvent(state, r.event.Event)
-			}
 			data, err := json.Marshal(taggedEventStreamEnvelope{
 				TaggedEvent: r.event,
-				Workflow:    workflow,
 			})
 			if err == nil {
 				cursorID := events.FormatCursor(cursors)
