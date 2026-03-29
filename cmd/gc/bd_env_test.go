@@ -102,9 +102,9 @@ func TestBdRuntimeEnvLocalHostNoHostKey(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_DOLT_HOST", "")
-	os.Unsetenv("GC_DOLT_HOST")
+	_ = os.Unsetenv("GC_DOLT_HOST")
 	t.Setenv("GC_DOLT_PORT", "")
-	os.Unsetenv("GC_DOLT_PORT")
+	_ = os.Unsetenv("GC_DOLT_PORT")
 
 	cityPath := t.TempDir()
 	env := bdRuntimeEnv(cityPath)

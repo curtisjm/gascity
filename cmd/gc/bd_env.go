@@ -38,13 +38,15 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 	if rawBeadsProvider(cityPath) != "bd" {
 		return env
 	}
-	// Propagate external Dolt host so bd connects to the right server.
-	if host := os.Getenv("GC_DOLT_HOST"); host != "" {
+	// Propagate Dolt host/port from per-city config (registered by
+	// startBeadsLifecycle) or user env vars. Per-city config avoids
+	// process-global env pollution that breaks supervisor multi-tenancy.
+	if host := doltHostForCity(cityPath); host != "" {
 		env["GC_DOLT_HOST"] = host
 	}
-	// External host: use the port from env (set by applyDoltConfig or user).
-	if isExternalDolt() {
-		if port := os.Getenv("GC_DOLT_PORT"); port != "" {
+	// External host: use the port from config or user env.
+	if isExternalDolt(cityPath) {
+		if port := doltPortForCity(cityPath); port != "" {
 			env["GC_DOLT_PORT"] = port
 		}
 		return env
@@ -66,11 +68,11 @@ func bdRuntimeEnv(cityPath string) map[string]string {
 func cityRuntimeProcessEnv(cityPath string) []string {
 	overrides := citylayout.CityRuntimeEnvMap(cityPath)
 	if rawBeadsProvider(cityPath) == "bd" {
-		if host := os.Getenv("GC_DOLT_HOST"); host != "" {
+		if host := doltHostForCity(cityPath); host != "" {
 			overrides["GC_DOLT_HOST"] = host
 		}
-		if isExternalDolt() {
-			if port := os.Getenv("GC_DOLT_PORT"); port != "" {
+		if isExternalDolt(cityPath) {
+			if port := doltPortForCity(cityPath); port != "" {
 				overrides["GC_DOLT_PORT"] = port
 			}
 		} else if port := currentDoltPort(cityPath); port != "" {

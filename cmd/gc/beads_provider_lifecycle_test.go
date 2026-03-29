@@ -562,7 +562,9 @@ func itoa(n int) string {
 
 // ── isExternalDolt tests ──────────────────────────────────────────────
 
-func TestIsExternalDolt(t *testing.T) {
+func TestIsExternalDoltEnvFallback(t *testing.T) {
+	// Without per-city config registered, isExternalDolt falls back to
+	// env vars with localhost exclusion (backwards compat).
 	tests := []struct {
 		host string
 		want bool
@@ -575,93 +577,140 @@ func TestIsExternalDolt(t *testing.T) {
 		{"10.0.0.5", true},
 		{"dolt.example.com", true},
 	}
+	cityPath := t.TempDir()
 	for _, tt := range tests {
 		t.Run(tt.host, func(t *testing.T) {
 			if tt.host == "" {
 				t.Setenv("GC_DOLT_HOST", "")
-				os.Unsetenv("GC_DOLT_HOST")
+				_ = os.Unsetenv("GC_DOLT_HOST")
 			} else {
 				t.Setenv("GC_DOLT_HOST", tt.host)
 			}
-			if got := isExternalDolt(); got != tt.want {
-				t.Errorf("isExternalDolt() with host=%q = %v, want %v", tt.host, got, tt.want)
+			if got := isExternalDolt(cityPath); got != tt.want {
+				t.Errorf("isExternalDolt(%q) with env host=%q = %v, want %v", cityPath, tt.host, got, tt.want)
 			}
 		})
 	}
 }
 
-// ── applyDoltConfig tests ─────────────────────────────────────────────
-
-func TestApplyDoltConfigSetsEnvFromConfig(t *testing.T) {
-	t.Setenv("GC_DOLT_HOST", "")
-	os.Unsetenv("GC_DOLT_HOST")
-	t.Setenv("GC_DOLT_PORT", "")
-	os.Unsetenv("GC_DOLT_PORT")
-
-	cfg := &config.City{
-		Dolt: config.DoltConfig{
-			Host: "mini2.hippo-tilapia.ts.net",
-			Port: 3307,
-		},
+func TestIsExternalDoltWithConfig(t *testing.T) {
+	// With per-city config registered, any explicit host or port means
+	// "user-managed" regardless of whether host is localhost.
+	tests := []struct {
+		name string
+		cfg  config.DoltConfig
+		want bool
+	}{
+		{"empty config", config.DoltConfig{}, false},
+		{"remote host", config.DoltConfig{Host: "mini2.hippo-tilapia.ts.net"}, true},
+		{"localhost host", config.DoltConfig{Host: "localhost"}, true},
+		{"127.0.0.1 host", config.DoltConfig{Host: "127.0.0.1"}, true},
+		{"port only", config.DoltConfig{Port: 3307}, true},
+		{"host and port", config.DoltConfig{Host: "mini2", Port: 3307}, true},
 	}
-	applyDoltConfig(cfg)
-
-	if got := os.Getenv("GC_DOLT_HOST"); got != "mini2.hippo-tilapia.ts.net" {
-		t.Errorf("GC_DOLT_HOST = %q, want %q", got, "mini2.hippo-tilapia.ts.net")
-	}
-	if got := os.Getenv("GC_DOLT_PORT"); got != "3307" {
-		t.Errorf("GC_DOLT_PORT = %q, want %q", got, "3307")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GC_DOLT_HOST", "")
+			_ = os.Unsetenv("GC_DOLT_HOST")
+			cityPath := t.TempDir()
+			if tt.cfg.Host != "" || tt.cfg.Port != 0 {
+				cityDoltConfigs.Store(cityPath, tt.cfg)
+				t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+			}
+			if got := isExternalDolt(cityPath); got != tt.want {
+				t.Errorf("isExternalDolt(%q) with cfg=%+v = %v, want %v", cityPath, tt.cfg, got, tt.want)
+			}
+		})
 	}
 }
 
-func TestApplyDoltConfigDoesNotOverrideUserEnv(t *testing.T) {
+// ── per-city dolt config registration tests ─────────────────────────
+
+func TestDoltHostForCityPrefersEnvOverConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "config-host.example.com", Port: 3307})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
 	t.Setenv("GC_DOLT_HOST", "user-override.example.com")
+
+	if got := doltHostForCity(cityPath); got != "user-override.example.com" {
+		t.Errorf("doltHostForCity = %q, want user env override %q", got, "user-override.example.com")
+	}
+}
+
+func TestDoltHostForCityFallsBackToConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "mini2.hippo-tilapia.ts.net", Port: 3307})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	t.Setenv("GC_DOLT_HOST", "")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+
+	if got := doltHostForCity(cityPath); got != "mini2.hippo-tilapia.ts.net" {
+		t.Errorf("doltHostForCity = %q, want config value %q", got, "mini2.hippo-tilapia.ts.net")
+	}
+}
+
+func TestDoltPortForCityPrefersEnvOverConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Port: 3307})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
 	t.Setenv("GC_DOLT_PORT", "9999")
 
-	cfg := &config.City{
-		Dolt: config.DoltConfig{
-			Host: "config-host.example.com",
-			Port: 3307,
-		},
-	}
-	applyDoltConfig(cfg)
-
-	if got := os.Getenv("GC_DOLT_HOST"); got != "user-override.example.com" {
-		t.Errorf("GC_DOLT_HOST = %q, want user override %q", got, "user-override.example.com")
-	}
-	if got := os.Getenv("GC_DOLT_PORT"); got != "9999" {
-		t.Errorf("GC_DOLT_PORT = %q, want user override %q", got, "9999")
+	if got := doltPortForCity(cityPath); got != "9999" {
+		t.Errorf("doltPortForCity = %q, want user env override %q", got, "9999")
 	}
 }
 
-func TestApplyDoltConfigNilSafe(t *testing.T) {
-	applyDoltConfig(nil) // should not panic
-}
+func TestDoltPortForCityFallsBackToConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Port: 3307})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
 
-func TestApplyDoltConfigSkipsZeroValues(t *testing.T) {
-	t.Setenv("GC_DOLT_HOST", "")
-	os.Unsetenv("GC_DOLT_HOST")
 	t.Setenv("GC_DOLT_PORT", "")
-	os.Unsetenv("GC_DOLT_PORT")
+	_ = os.Unsetenv("GC_DOLT_PORT")
 
-	cfg := &config.City{} // zero DoltConfig
-	applyDoltConfig(cfg)
-
-	if got := os.Getenv("GC_DOLT_HOST"); got != "" {
-		t.Errorf("GC_DOLT_HOST = %q, want empty for zero config", got)
+	if got := doltPortForCity(cityPath); got != "3307" {
+		t.Errorf("doltPortForCity = %q, want config value %q", got, "3307")
 	}
-	if got := os.Getenv("GC_DOLT_PORT"); got != "" {
-		t.Errorf("GC_DOLT_PORT = %q, want empty for zero config", got)
+}
+
+func TestStartBeadsLifecycleRegistersDoltConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_DOLT_HOST", "")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Dolt:      config.DoltConfig{Host: "mini2.hippo-tilapia.ts.net", Port: 3307},
+	}
+	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err != nil {
+		t.Fatalf("startBeadsLifecycle: %v", err)
+	}
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
+	// Config should be registered for this city.
+	if got := doltHostForCity(cityPath); got != "mini2.hippo-tilapia.ts.net" {
+		t.Errorf("doltHostForCity after lifecycle = %q, want %q", got, "mini2.hippo-tilapia.ts.net")
+	}
+	if got := doltPortForCity(cityPath); got != "3307" {
+		t.Errorf("doltPortForCity after lifecycle = %q, want %q", got, "3307")
 	}
 }
 
 // ── readDoltPort with external host ───────────────────────────────────
 
 func TestReadDoltPortPreservesExternalHostPort(t *testing.T) {
-	t.Setenv("GC_DOLT_HOST", "mini2.hippo-tilapia.ts.net")
+	cityDir := t.TempDir()
+	// Register per-city config (simulates startBeadsLifecycle having run).
+	cityDoltConfigs.Store(cityDir, config.DoltConfig{Host: "mini2.hippo-tilapia.ts.net", Port: 3307})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityDir) })
+
 	t.Setenv("GC_DOLT_PORT", "3307")
 
-	cityDir := t.TempDir()
 	// Write a local state file that would normally override — it should NOT.
 	ln := listenOnRandomPort(t)
 	t.Cleanup(func() { _ = ln.Close() })
@@ -685,21 +734,40 @@ func TestReadDoltPortPreservesExternalHostPort(t *testing.T) {
 // ── startBeadsLifecycle skips provider for external ───────────────────
 
 func TestStartBeadsLifecycleSkipsProviderForExternalHost(t *testing.T) {
-	t.Setenv("GC_DOLT_HOST", "mini2.hippo-tilapia.ts.net")
-	t.Setenv("GC_DOLT_PORT", "3307")
-	// Use a script that would fail if called — proves ensureBeadsProvider is skipped.
-	t.Setenv("GC_BEADS", "exec:/nonexistent-script-should-not-be-called")
-
 	cityPath := t.TempDir()
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
+	// Install a test script that tracks which operations are called.
+	// "start" should NOT be called (skipped by external host guard).
+	// "init" will be called but exits 2 (not needed).
+	callLog := filepath.Join(cityPath, "op-calls.log")
+	script := filepath.Join(cityPath, ".gc", "system", "bin", "gc-beads-bd")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$1\" >> "+callLog+"\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	// Should succeed because ensureBeadsProvider is skipped for external hosts.
-	// initBeadsForDir will still run but exit 2 (script not found) is handled.
-	// For this test, use file provider to avoid exec issues with init.
-	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS", "bd")
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Dolt:      config.DoltConfig{Host: "mini2.hippo-tilapia.ts.net", Port: 3307},
+	}
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+
 	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err != nil {
 		t.Fatalf("startBeadsLifecycle with external host: %v", err)
+	}
+
+	// Verify "start" was NOT called (skipped by guard).
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("reading call log: %v", err)
+	}
+	ops := strings.TrimSpace(string(data))
+	for _, line := range strings.Split(ops, "\n") {
+		if strings.TrimSpace(line) == "start" {
+			t.Errorf("ensureBeadsProvider('start') was called — should be skipped for external host with bd provider")
+		}
 	}
 }
