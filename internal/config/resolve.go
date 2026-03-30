@@ -107,11 +107,11 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 			// PromptMode, ResumeFlag, etc. from the builtin defaults.
 			builtins := BuiltinProviders()
 			if base, ok := builtins[name]; ok {
-				merged := mergeProviderOverBuiltin(base, spec)
+				merged := MergeProviderOverBuiltin(base, spec)
 				return &merged, nil
 			}
 			if base, ok := builtins[spec.Command]; ok {
-				merged := mergeProviderOverBuiltin(base, spec)
+				merged := MergeProviderOverBuiltin(base, spec)
 				return &merged, nil
 			}
 			return &spec, nil
@@ -130,7 +130,7 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 	return nil, fmt.Errorf("%w: %q", ErrProviderNotFound, name)
 }
 
-// mergeProviderOverBuiltin layers city-level provider fields over a built-in
+// MergeProviderOverBuiltin layers city-level provider fields over a built-in
 // base. Non-zero city fields override; zero-value fields inherit the built-in
 // defaults. Slice fields (Args, ProcessNames, OptionsSchema) replace entirely
 // when non-nil. Map fields (Env, PermissionModes) merge additively (city keys
@@ -139,7 +139,7 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 // Note: booleans are one-directional (can enable, not disable) due to TOML
 // zero-value ambiguity — city providers cannot override a built-in's true
 // to false for EmitsPermissionWarning, SupportsACP, or SupportsHooks.
-func mergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
+func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	result := base
 
 	// Scalar fields: override if city defines them.

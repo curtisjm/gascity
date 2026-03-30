@@ -515,7 +515,7 @@ func TestLookupProviderCityNoMergeForUnknownCommand(t *testing.T) {
 	}
 }
 
-// --- mergeProviderOverBuiltin tests ---
+// --- MergeProviderOverBuiltin tests ---
 
 func TestMergeProviderOverBuiltin(t *testing.T) {
 	base := ProviderSpec{
@@ -536,7 +536,7 @@ func TestMergeProviderOverBuiltin(t *testing.T) {
 		Env:     map[string]string{"CITY_KEY": "city_val"},
 	}
 
-	result := mergeProviderOverBuiltin(base, city)
+	result := MergeProviderOverBuiltin(base, city)
 
 	// City args replace entirely.
 	if len(result.Args) != 3 {
@@ -787,10 +787,10 @@ func TestResolveProviderResumeCommandAgentOverride(t *testing.T) {
 	}
 }
 
-// --- mergeProviderOverBuiltin field sync ---
+// --- MergeProviderOverBuiltin field sync ---
 
 // TestMergeProviderOverBuiltinFieldSync uses reflection to verify that
-// mergeProviderOverBuiltin handles every field on ProviderSpec. When a
+// MergeProviderOverBuiltin handles every field on ProviderSpec. When a
 // new field is added to ProviderSpec, the merge function must be updated
 // or this test will fail.
 //
@@ -837,14 +837,14 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 
 	// Merge city over a zero-value base.
 	base := ProviderSpec{}
-	result := mergeProviderOverBuiltin(base, city)
+	result := MergeProviderOverBuiltin(base, city)
 
 	// Every field on the result should be non-zero (city values should propagate).
 	rv := reflect.ValueOf(result)
 	for i := 0; i < ct.NumField(); i++ {
 		f := ct.Field(i)
 		if rv.Field(i).IsZero() {
-			t.Errorf("mergeProviderOverBuiltin did not propagate field %q from city to result", f.Name)
+			t.Errorf("MergeProviderOverBuiltin did not propagate field %q from city to result", f.Name)
 		}
 	}
 }
