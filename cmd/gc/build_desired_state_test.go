@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,66 @@ type listFailStore struct {
 
 func (s listFailStore) List(_ ...string) ([]beads.Bead, error) {
 	return nil, errors.New("list failed")
+}
+
+func TestCollectAssignedWorkBeads_IncludesReadyOpenAssignedHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	handoff, err := store.Create(beads.Bead{
+		Title:    "merge me",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	})
+	if err != nil {
+		t.Fatalf("create handoff bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "queued pool work",
+		Type:   "task",
+		Status: "open",
+	}); err != nil {
+		t.Fatalf("create queued bead: %v", err)
+	}
+
+	got := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	if len(got) != 1 {
+		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 1: %#v", len(got), got)
+	}
+	if got[0].ID != handoff.ID {
+		t.Fatalf("collectAssignedWorkBeads returned %q, want %q", got[0].ID, handoff.ID)
+	}
+	if got[0].Assignee != "repo/refinery" || got[0].Status != "open" {
+		t.Fatalf("assigned handoff bead = assignee %q status %q, want repo/refinery open", got[0].Assignee, got[0].Status)
+	}
+}
+
+func TestCollectAssignedWorkBeads_ExcludesBlockedOpenAssignedHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	blocker, err := store.Create(beads.Bead{
+		Title:  "blocker",
+		Type:   "task",
+		Status: "open",
+	})
+	if err != nil {
+		t.Fatalf("create blocker bead: %v", err)
+	}
+	handoff, err := store.Create(beads.Bead{
+		Title:    "merge me later",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "repo/refinery",
+	})
+	if err != nil {
+		t.Fatalf("create handoff bead: %v", err)
+	}
+	if err := store.DepAdd(handoff.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("add blocking dep: %v", err)
+	}
+
+	got := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	if len(got) != 0 {
+		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 0: %#v", len(got), got)
+	}
 }
 
 func TestBuildDesiredState_SingletonTemplateDoesNotRealizeDependencyPoolFloorWithoutSession(t *testing.T) {
@@ -522,6 +583,7 @@ func TestBuildDesiredState_ZeroScaledPoolSessionKeepsDependencyFloorWhileDrainin
 }
 
 func TestBuildDesiredState_PoolCheckInjectsDoltPortForRigScopedAgent(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "myrig")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
@@ -559,6 +621,7 @@ func TestBuildDesiredState_PoolCheckInjectsDoltPortForRigScopedAgent(t *testing.
 }
 
 func TestBuildDesiredState_PoolCheckOmitsDoltPortForCityScopedAgent(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
 	cityPath := t.TempDir()
 	// Same check command but for a city-scoped agent (no rig). BEADS_DOLT_PORT
 	// should NOT be injected, so the check outputs 0.
@@ -584,13 +647,28 @@ func TestBuildDesiredState_PoolCheckOmitsDoltPortForCityScopedAgent(t *testing.T
 	}
 }
 
-func TestBuildDesiredState_PoolCheckOmitsDoltPortWhenRigHasNoDoltPort(t *testing.T) {
+func TestBuildDesiredState_PoolCheckUsesManagedCityDoltPortWhenRigHasNoOverride(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "myrig")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Rig exists but has no DoltPort configured.
+	ln := listenOnRandomPort(t)
+	defer func() {
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close listener: %v", err)
+		}
+	}()
+	if err := writeDoltState(cityPath, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	checkCmd := `sh -c 'test -n "$BEADS_DOLT_PORT" && printf 2 || printf 0'`
 	cfg := &config.City{
 		Rigs: []config.Rig{{
@@ -613,8 +691,8 @@ func TestBuildDesiredState_PoolCheckOmitsDoltPortWhenRigHasNoDoltPort(t *testing
 			workerSlots++
 		}
 	}
-	if workerSlots != 0 {
-		t.Fatalf("worker desired slots = %d, want 0 (rig has no DoltPort)", workerSlots)
+	if workerSlots != 2 {
+		t.Fatalf("worker desired slots = %d, want 2 (managed city dolt port should be injected for rig)", workerSlots)
 	}
 }
 

@@ -32,6 +32,7 @@ type poolEvalWork struct {
 }
 
 func evaluatePendingPools(
+	cityPath string,
 	cfg *config.City,
 	pendingPools []poolEvalWork,
 	stderr io.Writer,
@@ -44,18 +45,8 @@ func evaluatePendingPools(
 	var wg sync.WaitGroup
 	for j, pw := range pendingPools {
 		wg.Add(1)
-		// For rig-scoped agents with an external Dolt server, prefix
-		// the pool check command with BEADS_DOLT_PORT so bd connects
-		// to the correct server (matching computeWorkSet behavior).
 		sp := pw.sp
-		if dir := cfg.Agents[pw.agentIdx].Dir; dir != "" {
-			for _, r := range cfg.Rigs {
-				if r.Name == dir && r.DoltPort != "" {
-					sp.Check = "BEADS_DOLT_PORT=" + r.DoltPort + " " + sp.Check
-					break
-				}
-			}
-		}
+		sp.Check = prefixControllerQueryEnv(cityPath, cfg, &cfg.Agents[pw.agentIdx], sp.Check)
 		go func(idx int, name string, sp scaleParams, dir string) {
 			defer wg.Done()
 			d, err := evaluatePool(name, sp, dir, shellScaleCheck)
@@ -79,11 +70,12 @@ func evaluatePendingPools(
 // from agent qualified name → desired count. Used to feed scale_check
 // results into ComputePoolDesiredStates.
 func evaluatePendingPoolsMap(
+	cityPath string,
 	cfg *config.City,
 	pendingPools []poolEvalWork,
 	stderr io.Writer,
 ) map[string]int {
-	counts := evaluatePendingPools(cfg, pendingPools, stderr)
+	counts := evaluatePendingPools(cityPath, cfg, pendingPools, stderr)
 	m := make(map[string]int, len(counts))
 	for j, pw := range pendingPools {
 		m[cfg.Agents[pw.agentIdx].QualifiedName()] = counts[j]
@@ -162,8 +154,7 @@ func buildDesiredStateWithSessionBeads(
 			continue
 		}
 
-		isExplicitMultiSession := cfg.Agents[i].MaxActiveSessions != nil && *cfg.Agents[i].MaxActiveSessions != 1
-		if sp.Max == 1 && !isExplicitMultiSession {
+		if sp.Max == 1 && !isMultiSessionCfgAgent(&cfg.Agents[i]) {
 			// Fixed agent.
 			rigName := configuredRigName(cityPath, &cfg.Agents[i], cfg.Rigs)
 			if rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
@@ -194,7 +185,7 @@ func buildDesiredStateWithSessionBeads(
 
 	// scale_check runs in parallel for all pool agents — the authoritative
 	// demand signal for new sessions. Computed once, returned in result.
-	scaleCheckCounts := evaluatePendingPoolsMap(cfg, pendingPools, stderr)
+	scaleCheckCounts := evaluatePendingPoolsMap(cityPath, cfg, pendingPools, stderr)
 
 	// Collect work beads with assignees — used for both pool demand and
 	// named session on_demand wake. Hoisted out of the store block so
@@ -230,7 +221,7 @@ func buildDesiredStateWithSessionBeads(
 				// If multi-instance (max > 1 or unlimited), use themed name
 				// (from namepool) or {name}-{N} suffix.
 				name := cfg.Agents[pw.agentIdx].Name
-				isMultiInstance := pw.sp.Max != 1
+				isMultiInstance := isMultiSessionCfgAgent(&cfg.Agents[pw.agentIdx])
 				if isMultiInstance {
 					name = poolInstanceName(cfg.Agents[pw.agentIdx].Name, slot, &cfg.Agents[pw.agentIdx])
 				}
@@ -294,7 +285,7 @@ func buildDesiredStateWithSessionBeads(
 			continue
 		}
 		dir := agentCommandDir(cityPath, spec.Agent, cfg.Rigs)
-		out, err := shellScaleCheck(wq, dir)
+		out, err := shellScaleCheck(prefixControllerQueryEnv(cityPath, cfg, spec.Agent, wq), dir)
 		if err != nil {
 			continue
 		}
@@ -346,10 +337,10 @@ func buildDesiredStateWithSessionBeads(
 }
 
 // collectAssignedWorkBeads queries each store (city + rigs) for work beads
-// that have an assignee. Two queries per store: bd list --status=in_progress
-// and bd ready. Results are filtered to only beads with a non-empty assignee.
-// The caller cross-references these with session beads to determine which
-// sessions have active work and must stay alive.
+// that have an assignee. It includes in-progress assigned work plus
+// open assigned work that is actually ready. The caller cross-references
+// these with session beads to determine which sessions have active work
+// and must stay alive.
 func collectAssignedWorkBeads(
 	cfg *config.City,
 	cityStore beads.Store,
@@ -369,24 +360,31 @@ func collectAssignedWorkBeads(
 	}
 
 	var result []beads.Bead
+	seen := make(map[string]struct{})
 	for _, s := range stores {
 		// In-progress beads with an assignee (active work).
 		if inProgress, err := s.List("in_progress"); err == nil {
-			appendAssigned(&result, inProgress)
+			appendAssignedUnique(&result, inProgress, seen)
 		}
-		// Ready beads with an assignee (claimed but not started).
+		// Ready beads with an assignee (queued direct handoff work that is
+		// actually runnable, not merely open).
 		if ready, err := s.Ready(); err == nil {
-			appendAssigned(&result, ready)
+			appendAssignedUnique(&result, ready, seen)
 		}
 	}
 	return result
 }
 
-func appendAssigned(dst *[]beads.Bead, beadList []beads.Bead) {
+func appendAssignedUnique(dst *[]beads.Bead, beadList []beads.Bead, seen map[string]struct{}) {
 	for _, b := range beadList {
-		if strings.TrimSpace(b.Assignee) != "" {
-			*dst = append(*dst, b)
+		if strings.TrimSpace(b.Assignee) == "" {
+			continue
 		}
+		if _, ok := seen[b.ID]; ok {
+			continue
+		}
+		seen[b.ID] = struct{}{}
+		*dst = append(*dst, b)
 	}
 }
 
@@ -554,8 +552,7 @@ func ensureDependencyOnlyTemplate(
 
 	if bp.beadStore == nil {
 		name := cfgAgent.Name
-		sp := scaleParamsFor(cfgAgent)
-		isMultiInstance := sp.Max != 1
+		isMultiInstance := isMultiSessionCfgAgent(cfgAgent)
 		if isMultiInstance {
 			name = poolInstanceName(cfgAgent.Name, 1, cfgAgent)
 		}
@@ -772,6 +769,9 @@ func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp Te
 func isMultiSessionCfgAgent(a *config.Agent) bool {
 	if a == nil {
 		return false
+	}
+	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
+		return true
 	}
 	maxSess := a.EffectiveMaxActiveSessions()
 	return maxSess == nil || *maxSess != 1
