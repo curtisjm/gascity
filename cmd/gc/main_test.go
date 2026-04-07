@@ -3027,6 +3027,50 @@ prompt_template = "prompts/mayor.md"
 	}
 }
 
+func TestDoPrimeFallsBackToGCAliasWhenGCAgentUnresolvable(t *testing.T) {
+	// When GC_AGENT is a session bead ID (not an agent name), gc prime should
+	// fall back to GC_ALIAS to resolve the agent.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptsDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptContent := "You are the mayor. Plan and delegate work.\n"
+	if err := os.WriteFile(filepath.Join(promptsDir, "mayor.md"), []byte(promptContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_AGENT", "bl-9jl") // bead ID, not an agent name
+	t.Setenv("GC_ALIAS", "mayor")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrime(nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doPrime = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != promptContent {
+		t.Errorf("stdout = %q, want %q (got default prompt instead of mayor template)", stdout.String(), promptContent)
+	}
+}
+
 // --- findEnclosingRig tests ---
 
 func TestFindEnclosingRig(t *testing.T) {
