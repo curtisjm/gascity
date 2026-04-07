@@ -466,6 +466,14 @@ func appendAssignedUnique(dst *[]beads.Bead, beadList []beads.Bead, seen map[str
 		if strings.TrimSpace(b.Assignee) == "" {
 			continue
 		}
+		// Session beads are not actionable work — filter them at the source
+		// so all consumers see only real tasks. Message beads are NOT filtered
+		// here because they represent mail that should wake/materialize sessions;
+		// idle nudge filters messages locally since mail nudging is handled
+		// separately by the mail system.
+		if b.Type == sessionBeadType {
+			continue
+		}
 		if _, ok := seen[b.ID]; ok {
 			continue
 		}

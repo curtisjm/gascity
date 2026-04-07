@@ -107,6 +107,48 @@ func TestCollectAssignedWorkBeads_ExcludesRoutedToMetadataWithoutAssignee(t *tes
 	}
 }
 
+func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	// Session bead with assignee — should be excluded.
+	if _, err := store.Create(beads.Bead{
+		Title:    "worker session",
+		Type:     sessionBeadType,
+		Status:   "open",
+		Assignee: "worker-1",
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	// Message bead with assignee — should be included (messages are valid demand).
+	msg, err := store.Create(beads.Bead{
+		Title:    "you have mail",
+		Type:     messageBeadType,
+		Status:   "open",
+		Assignee: "worker-1",
+	})
+	if err != nil {
+		t.Fatalf("create message bead: %v", err)
+	}
+	// Real task bead with assignee — should be included.
+	task, err := store.Create(beads.Bead{
+		Title:    "do the thing",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "worker-1",
+	})
+	if err != nil {
+		t.Fatalf("create task bead: %v", err)
+	}
+	got, _ := collectAssignedWorkBeads(&config.City{}, store, nil, nil)
+	if len(got) != 2 {
+		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 2 (message + task): %#v", len(got), got)
+	}
+	ids := map[string]bool{got[0].ID: true, got[1].ID: true}
+	if !ids[msg.ID] || !ids[task.ID] {
+		t.Fatalf("expected message %q and task %q, got %v", msg.ID, task.ID, ids)
+	}
+}
+
 func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

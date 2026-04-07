@@ -133,6 +133,57 @@ func TestIdleNudge_RespectsGracePeriod(t *testing.T) {
 	}
 }
 
+func TestIdleNudge_IgnoresSessionAndMessageBeads(t *testing.T) {
+	sp := runtime.NewFake()
+	sp.Start(context.TODO(), "worker-1", runtime.Config{}) //nolint:errcheck
+	sp.SetPeekOutput("worker-1", "❯ \n  bypass permissions on")
+
+	session := beads.Bead{
+		ID:       "s-1",
+		Status:   "open",
+		Type:     "session",
+		Metadata: map[string]string{"session_name": "worker-1"},
+	}
+	// These look like assigned work but are session/message beads, not tasks.
+	sessionBead := beads.Bead{
+		ID:       "s-2",
+		Status:   "open",
+		Type:     sessionBeadType,
+		Assignee: "worker-1",
+	}
+	messageBead := beads.Bead{
+		ID:       "m-1",
+		Status:   "open",
+		Type:     messageBeadType,
+		Assignee: "worker-1",
+	}
+
+	in := newIdleNudger()
+	in.grace = 0
+	var out bytes.Buffer
+
+	in.nudgeIdleSessions(sp, []beads.Bead{session}, []beads.Bead{sessionBead, messageBead}, time.Now(), &out)
+	in.nudgeIdleSessions(sp, []beads.Bead{session}, []beads.Bead{sessionBead, messageBead}, time.Now().Add(time.Second), &out)
+	if out.Len() > 0 {
+		t.Fatalf("should not nudge when only session/message beads are assigned: %s", out.String())
+	}
+
+	// With a real task bead alongside the filtered types, the nudge should fire.
+	taskBead := beads.Bead{
+		ID:       "t-1",
+		Status:   "in_progress",
+		Assignee: "worker-1",
+	}
+	out.Reset()
+	in2 := newIdleNudger()
+	in2.grace = 0
+	in2.nudgeIdleSessions(sp, []beads.Bead{session}, []beads.Bead{sessionBead, messageBead, taskBead}, time.Now(), &out)
+	in2.nudgeIdleSessions(sp, []beads.Bead{session}, []beads.Bead{sessionBead, messageBead, taskBead}, time.Now().Add(time.Second), &out)
+	if !bytes.Contains(out.Bytes(), []byte("idle-nudge: nudged worker-1")) {
+		t.Fatalf("should nudge when real task bead is present alongside session/message beads, got: %s", out.String())
+	}
+}
+
 func TestIdleNudge_MatchesWorkByAlias(t *testing.T) {
 	sp := runtime.NewFake()
 	sp.Start(context.TODO(), "repo--refinery", runtime.Config{}) //nolint:errcheck

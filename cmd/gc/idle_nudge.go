@@ -29,6 +29,10 @@ type idleNudger struct {
 
 const defaultIdleNudgeGrace = 2 * time.Minute
 
+// messageBeadType is the bead type for mail messages. No exported constant
+// exists in internal/mail/beadmail, so we define it locally.
+const messageBeadType = "message"
+
 func newIdleNudger() *idleNudger {
 	return &idleNudger{
 		firstIdle: make(map[string]time.Time),
@@ -125,6 +129,14 @@ func buildSessionWorkLookup(sessions []beads.Bead, workBeads []beads.Bead) map[s
 
 	result := make(map[string]bool)
 	for _, wb := range workBeads {
+		// Session and message beads are not actionable task work. Session
+		// beads are also filtered upstream in appendAssignedUnique; message
+		// beads are filtered only here because they ARE valid demand for
+		// wake/materialization but should not trigger idle-at-prompt nudges
+		// (the mail system handles nudging for mail).
+		if wb.Type == sessionBeadType || wb.Type == messageBeadType {
+			continue
+		}
 		assignee := strings.TrimSpace(wb.Assignee)
 		if assignee == "" {
 			continue
