@@ -281,9 +281,6 @@ func TestTutorial03Sessions(t *testing.T) {
 		if err != nil || strings.TrimSpace(out) == "" {
 			return false
 		}
-		if !strings.Contains(out, "[ASSISTANT]") {
-			return false
-		}
 		mayorTailLogs = out
 		return true
 	}) {

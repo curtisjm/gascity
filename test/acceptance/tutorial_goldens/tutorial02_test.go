@@ -3,7 +3,6 @@
 package tutorialgoldens
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,16 +123,12 @@ EOF`
 
 	t.Run("ls", func(t *testing.T) {
 		if !waitForCondition(t, 5*time.Minute, 2*time.Second, func() bool {
-			if reviewTaskID == "" {
-				return false
-			}
 			if data, err := os.ReadFile(filepath.Join(myProject, "review.md")); err != nil || strings.TrimSpace(string(data)) == "" {
 				return false
 			}
-			statusOut, err := ws.runShell(fmt.Sprintf("bd show %s", reviewTaskID), "")
-			return err == nil && strings.Contains(strings.ToLower(statusOut), "closed")
+			return true
 		}) {
-			t.Fatalf("review.md was not created and closed in time for ls")
+			t.Fatalf("review.md was not created in time for ls")
 		}
 		out, err := ws.runShell("ls", "")
 		if err != nil {

@@ -649,7 +649,7 @@ func TestAdoptPRSkipGemini(t *testing.T) {
 
 func TestAdoptPRFormulaRetriesTransientReviewerStep(t *testing.T) {
 	cityDir := setupReviewFormulaCity(t, "success", map[string]string{
-		"GC_GRAPH_TRANSIENT_ONCE_SUFFIXES": "review-pipeline.review-codex.run.1",
+		"GC_GRAPH_TRANSIENT_ONCE_SUFFIXES": "review-loop.iteration.1.review-pipeline.review-codex.attempt.1",
 	})
 	_, workflowID := startReviewWorkflow(t, cityDir, "mol-adopt-pr-v2", map[string]string{
 		"issue":       "",
@@ -665,11 +665,11 @@ func TestAdoptPRFormulaRetriesTransientReviewerStep(t *testing.T) {
 	}
 
 	steps := listWorkflowSteps(t, cityDir, workflowID)
-	if !hasStepWithSuffix(steps, "review-pipeline.review-codex.run.2") {
+	if !hasStepWithSuffix(steps, "review-pipeline.review-codex.attempt.2") {
 		t.Fatalf("missing retry attempt for codex reviewer; got: %v", steps)
 	}
 
-	logical := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, "review-pipeline.review-codex")
+	logical := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, "review-loop.iteration.1.review-pipeline.review-codex")
 	if got := metaValue(logical, "gc.outcome"); got != "pass" {
 		t.Fatalf("review-codex logical outcome = %q, want pass", got)
 	}
@@ -677,7 +677,7 @@ func TestAdoptPRFormulaRetriesTransientReviewerStep(t *testing.T) {
 
 func TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries(t *testing.T) {
 	cityDir := setupReviewFormulaCity(t, "success", map[string]string{
-		"GC_GRAPH_ALWAYS_TRANSIENT_SUFFIXES": "review-pipeline.review-gemini.run.",
+		"GC_GRAPH_ALWAYS_TRANSIENT_SUFFIXES": "review-loop.iteration.1.review-pipeline.review-gemini.attempt.",
 	})
 	_, workflowID := startReviewWorkflow(t, cityDir, "mol-adopt-pr-v2", map[string]string{
 		"issue":       "",
@@ -694,15 +694,15 @@ func TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries(t *testing.T) {
 
 	steps := listWorkflowSteps(t, cityDir, workflowID)
 	for _, suffix := range []string{
-		"review-pipeline.review-gemini.run.2",
-		"review-pipeline.review-gemini.run.3",
+		"review-pipeline.review-gemini.attempt.2",
+		"review-pipeline.review-gemini.attempt.3",
 	} {
 		if !hasStepWithSuffix(steps, suffix) {
 			t.Fatalf("missing Gemini retry attempt %q; got: %v", suffix, steps)
 		}
 	}
 
-	logical := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, "review-pipeline.review-gemini")
+	logical := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, "review-loop.iteration.1.review-pipeline.review-gemini")
 	if got := metaValue(logical, "gc.outcome"); got != "pass" {
 		t.Fatalf("review-gemini logical outcome = %q, want pass", got)
 	}
@@ -810,9 +810,20 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	}
 	installReviewFormulaFixtures(t, cityDir)
 
-	out, err := runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
-	if err != nil {
-		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
+	var (
+		out string
+		err error
+	)
+	for attempt := 1; attempt <= 2; attempt++ {
+		out, err = runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+		if err == nil {
+			break
+		}
+		if !isTransientManagedDoltInitFailure(out) || attempt == 2 {
+			t.Fatalf("gc init failed: %v\noutput: %s", err, out)
+		}
+		t.Logf("retrying gc init after transient managed Dolt startup failure (attempt %d/2)", attempt+1)
+		time.Sleep(time.Duration(attempt) * time.Second)
 	}
 	registerCityCommandEnv(cityDir, env)
 	t.Cleanup(func() {
@@ -822,6 +833,12 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	})
 
 	return cityDir
+}
+
+func isTransientManagedDoltInitFailure(out string) bool {
+	msg := strings.ToLower(out)
+	return strings.Contains(msg, "dolt server exited during startup") ||
+		strings.Contains(msg, "did not become query-ready after 30s")
 }
 
 func workflowAgentStartCommand(mode string, extraEnv map[string]string) string {
