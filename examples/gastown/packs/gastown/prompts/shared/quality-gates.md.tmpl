@@ -1,0 +1,10 @@
+{{ define "quality-gates" -}}
+2. **Run quality gates** (only if code changes were made):
+{{ if .InstructionsFile -}}
+   Check your project's `{{ .InstructionsFile }}` for the specific quality gate commands
+   (tests, linters, builds). Run them and verify they pass.
+{{ else -}}
+   Run the standard test and lint commands for the project's language.
+{{ end -}}
+   File P0 beads if quality gates are broken.
+{{- end }}

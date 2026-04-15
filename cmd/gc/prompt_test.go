@@ -499,3 +499,58 @@ func TestMergeFragmentLists(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildTemplateDataIncludesInstructionsFile(t *testing.T) {
+	ctx := PromptContext{InstructionsFile: "CLAUDE.md"}
+	m := buildTemplateData(ctx)
+	if m["InstructionsFile"] != "CLAUDE.md" {
+		t.Errorf("InstructionsFile = %q, want %q", m["InstructionsFile"], "CLAUDE.md")
+	}
+}
+
+func TestBuildTemplateDataInstructionsFileEmpty(t *testing.T) {
+	ctx := PromptContext{}
+	m := buildTemplateData(ctx)
+	if m["InstructionsFile"] != "" {
+		t.Errorf("InstructionsFile = %q, want empty", m["InstructionsFile"])
+	}
+}
+
+func TestRenderPromptQualityGatesFallbackClaude(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/shared/quality-gates.md.tmpl"] = []byte(
+		`{{ define "quality-gates" }}Check {{ .InstructionsFile }} for quality gates.{{ end }}`)
+	f.Files["/city/prompts/test.md.tmpl"] = []byte(
+		`{{ template "quality-gates" . }}`)
+	ctx := PromptContext{InstructionsFile: "CLAUDE.md"}
+	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+	if !strings.Contains(got, "CLAUDE.md") {
+		t.Errorf("expected CLAUDE.md in output, got: %q", got)
+	}
+}
+
+func TestRenderPromptQualityGatesFallbackAgents(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/shared/quality-gates.md.tmpl"] = []byte(
+		`{{ define "quality-gates" }}Check {{ .InstructionsFile }} for quality gates.{{ end }}`)
+	f.Files["/city/prompts/test.md.tmpl"] = []byte(
+		`{{ template "quality-gates" . }}`)
+	ctx := PromptContext{InstructionsFile: "AGENTS.md"}
+	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+	if !strings.Contains(got, "AGENTS.md") {
+		t.Errorf("expected AGENTS.md in output, got: %q", got)
+	}
+}
+
+func TestRenderPromptQualityGatesEmptyInstructionsFile(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/shared/quality-gates.md.tmpl"] = []byte(
+		`{{ define "quality-gates" }}{{ if .InstructionsFile }}Check {{ .InstructionsFile }}.{{ else }}Run standard quality gates.{{ end }}{{ end }}`)
+	f.Files["/city/prompts/test.md.tmpl"] = []byte(
+		`{{ template "quality-gates" . }}`)
+	ctx := PromptContext{}
+	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+	if !strings.Contains(got, "Run standard quality gates.") {
+		t.Errorf("expected fallback message, got: %q", got)
+	}
+}
