@@ -2,6 +2,8 @@ package main
 
 import (
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -498,4 +500,178 @@ func TestMergeFragmentLists(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildTemplateDataIncludesInstructionsFile(t *testing.T) {
+	ctx := PromptContext{InstructionsFile: "CLAUDE.md"}
+	m := buildTemplateData(ctx)
+	if m["InstructionsFile"] != "CLAUDE.md" {
+		t.Errorf("InstructionsFile = %q, want %q", m["InstructionsFile"], "CLAUDE.md")
+	}
+}
+
+func TestBuildTemplateDataInstructionsFileEmpty(t *testing.T) {
+	ctx := PromptContext{}
+	m := buildTemplateData(ctx)
+	if m["InstructionsFile"] != "" {
+		t.Errorf("InstructionsFile = %q, want empty", m["InstructionsFile"])
+	}
+}
+
+func TestRenderPromptQualityGatesFallbackClaude(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/shared/quality-gates.md.tmpl"] = []byte(
+		`{{ define "quality-gates" }}Check {{ .InstructionsFile }} for quality gates.{{ end }}`)
+	f.Files["/city/prompts/test.md.tmpl"] = []byte(
+		`{{ template "quality-gates" . }}`)
+	ctx := PromptContext{InstructionsFile: "CLAUDE.md"}
+	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+	if !strings.Contains(got, "CLAUDE.md") {
+		t.Errorf("expected CLAUDE.md in output, got: %q", got)
+	}
+}
+
+func TestRenderPromptQualityGatesFallbackAgents(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/shared/quality-gates.md.tmpl"] = []byte(
+		`{{ define "quality-gates" }}Check {{ .InstructionsFile }} for quality gates.{{ end }}`)
+	f.Files["/city/prompts/test.md.tmpl"] = []byte(
+		`{{ template "quality-gates" . }}`)
+	ctx := PromptContext{InstructionsFile: "AGENTS.md"}
+	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+	if !strings.Contains(got, "AGENTS.md") {
+		t.Errorf("expected AGENTS.md in output, got: %q", got)
+	}
+}
+
+func TestRenderPromptQualityGatesEmptyInstructionsFile(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/shared/quality-gates.md.tmpl"] = []byte(
+		`{{ define "quality-gates" }}{{ if .InstructionsFile }}Check {{ .InstructionsFile }}.{{ else }}Run standard quality gates.{{ end }}{{ end }}`)
+	f.Files["/city/prompts/test.md.tmpl"] = []byte(
+		`{{ template "quality-gates" . }}`)
+	ctx := PromptContext{}
+	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+	if !strings.Contains(got, "Run standard quality gates.") {
+		t.Errorf("expected fallback message, got: %q", got)
+	}
+}
+
+// loadRealPrompts populates a Fake FS with the real crew.md.tmpl and all
+// shared templates from examples/gastown/packs/gastown/prompts/. Returns the
+// relative template path suitable for renderPrompt.
+func loadRealPrompts(t *testing.T, f *fsys.Fake, cityPath string) string {
+	t.Helper()
+
+	// Locate the real template directory relative to the test binary.
+	// The test runs from cmd/gc, so we go up two levels to the repo root.
+	repoRoot := filepath.Join("..", "..")
+	promptsDir := filepath.Join(repoRoot, "examples", "gastown", "packs", "gastown", "prompts")
+
+	// Load the main crew template.
+	crewPath := filepath.Join(promptsDir, "crew.md.tmpl")
+	crewData, err := os.ReadFile(crewPath)
+	if err != nil {
+		t.Fatalf("reading real crew.md.tmpl: %v", err)
+	}
+	f.Files[filepath.Join(cityPath, "prompts", "crew.md.tmpl")] = crewData
+
+	// Load all shared templates.
+	sharedDir := filepath.Join(promptsDir, "shared")
+	entries, err := os.ReadDir(sharedDir)
+	if err != nil {
+		t.Fatalf("reading shared templates dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md.tmpl") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(sharedDir, e.Name()))
+		if err != nil {
+			t.Fatalf("reading shared template %q: %v", e.Name(), err)
+		}
+		f.Files[filepath.Join(cityPath, "prompts", "shared", e.Name())] = data
+	}
+
+	return "prompts/crew.md.tmpl"
+}
+
+// TestRenderRealCrewPromptInstructionsFileCLAUDE renders the real gastown
+// crew.md.tmpl with all real shared templates (including quality-gates.md.tmpl)
+// and verifies that InstructionsFile="CLAUDE.md" flows through to the output.
+func TestRenderRealCrewPromptInstructionsFileCLAUDE(t *testing.T) {
+	f := fsys.NewFake()
+	cityPath := "/city"
+	tmplPath := loadRealPrompts(t, f, cityPath)
+
+	ctx := PromptContext{
+		CityRoot:         cityPath,
+		AgentName:        "myrig/crew/alice",
+		TemplateName:     "crew",
+		RigName:          "myrig",
+		WorkDir:          "/city/myrig/crew/alice",
+		InstructionsFile: "CLAUDE.md",
+	}
+	got := renderPrompt(f, cityPath, "gastown", tmplPath, ctx, "", io.Discard, nil, nil, nil)
+	if !strings.Contains(got, "CLAUDE.md") {
+		t.Errorf("InstructionsFile=CLAUDE.md not found in rendered crew prompt.\nOutput (first 500 chars): %s", truncateOutput(got, 500))
+	}
+}
+
+// TestRenderRealCrewPromptInstructionsFileAGENTS is the same integration test
+// with InstructionsFile="AGENTS.md".
+func TestRenderRealCrewPromptInstructionsFileAGENTS(t *testing.T) {
+	f := fsys.NewFake()
+	cityPath := "/city"
+	tmplPath := loadRealPrompts(t, f, cityPath)
+
+	ctx := PromptContext{
+		CityRoot:         cityPath,
+		AgentName:        "myrig/crew/alice",
+		TemplateName:     "crew",
+		RigName:          "myrig",
+		WorkDir:          "/city/myrig/crew/alice",
+		InstructionsFile: "AGENTS.md",
+	}
+	got := renderPrompt(f, cityPath, "gastown", tmplPath, ctx, "", io.Discard, nil, nil, nil)
+	if !strings.Contains(got, "AGENTS.md") {
+		t.Errorf("InstructionsFile=AGENTS.md not found in rendered crew prompt.\nOutput (first 500 chars): %s", truncateOutput(got, 500))
+	}
+}
+
+// TestRenderRealCrewPromptEmptyInstructionsFile verifies that when
+// InstructionsFile is empty, the real quality-gates shared template
+// produces generic fallback guidance instead of referencing a specific file.
+func TestRenderRealCrewPromptEmptyInstructionsFile(t *testing.T) {
+	f := fsys.NewFake()
+	cityPath := "/city"
+	tmplPath := loadRealPrompts(t, f, cityPath)
+
+	ctx := PromptContext{
+		CityRoot:     cityPath,
+		AgentName:    "myrig/crew/alice",
+		TemplateName: "crew",
+		RigName:      "myrig",
+		WorkDir:      "/city/myrig/crew/alice",
+		// InstructionsFile intentionally left empty.
+	}
+	got := renderPrompt(f, cityPath, "gastown", tmplPath, ctx, "", io.Discard, nil, nil, nil)
+	// The real quality-gates.md.tmpl should NOT mention CLAUDE.md or AGENTS.md.
+	if strings.Contains(got, "CLAUDE.md") {
+		t.Error("empty InstructionsFile should not produce CLAUDE.md reference")
+	}
+	if strings.Contains(got, "AGENTS.md") {
+		t.Error("empty InstructionsFile should not produce AGENTS.md reference")
+	}
+	// Should contain the generic fallback text from the real template.
+	if !strings.Contains(got, "quality gate") && !strings.Contains(got, "test and lint") {
+		t.Errorf("expected generic quality-gate fallback text in output.\nOutput (first 500 chars): %s", truncateOutput(got, 500))
+	}
+}
+
+func truncateOutput(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
