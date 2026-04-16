@@ -234,6 +234,83 @@ func TestResolveSessionLogPathFallsBackWhenSessionKeyFileMissing(t *testing.T) {
 	}
 }
 
+func TestResolveStoredSessionLogSource_UniqueWorkDirFallsBackBeyondLatestAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	workDir := t.TempDir()
+	searchBase := t.TempDir()
+	want := writeNamedTestSession(t, searchBase, workDir, "actual-session.jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	_, _ = store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "mayor",
+			"provider":     "claude",
+			"session_key":  "stale-session-key",
+			"session_name": "mayor",
+			"state":        "asleep",
+			"work_dir":     workDir,
+		},
+	})
+
+	got, provider, ok := resolveStoredSessionLogSource("", nil, store, "mayor", []string{searchBase})
+	if !ok {
+		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
+	}
+	if provider != "claude" {
+		t.Fatalf("resolveStoredSessionLogSource() provider = %q, want %q", provider, "claude")
+	}
+	if got != want {
+		t.Fatalf("resolveStoredSessionLogSource() path = %q, want %q", got, want)
+	}
+}
+
+func TestResolveStoredSessionLogSource_DoesNotCrossAmbiguousWorkDir(t *testing.T) {
+	store := beads.NewMemStore()
+	workDir := t.TempDir()
+	searchBase := t.TempDir()
+	writeNamedTestSession(t, searchBase, workDir, "actual-session.jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	_, _ = store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "mayor",
+			"provider":     "claude",
+			"session_key":  "stale-session-key",
+			"session_name": "mayor",
+			"state":        "asleep",
+			"work_dir":     workDir,
+		},
+	})
+	_, _ = store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "helper",
+			"provider":     "claude",
+			"session_name": "helper",
+			"state":        "asleep",
+			"work_dir":     workDir,
+		},
+	})
+
+	got, provider, ok := resolveStoredSessionLogSource("", nil, store, "mayor", []string{searchBase})
+	if !ok {
+		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
+	}
+	if provider != "claude" {
+		t.Fatalf("resolveStoredSessionLogSource() provider = %q, want %q", provider, "claude")
+	}
+	if got != "" {
+		t.Fatalf("resolveStoredSessionLogSource() path = %q, want empty for ambiguous same-workdir transcript", got)
+	}
+}
+
 func TestDoSessionLogsNegativeTail(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := doSessionLogs("/nonexistent", "", false, -1, &stdout, &stderr)
