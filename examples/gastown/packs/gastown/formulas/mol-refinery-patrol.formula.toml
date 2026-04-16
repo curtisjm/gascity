@@ -56,6 +56,10 @@ default = ""
 description = "Build command (e.g., go build ./...). Empty = skip."
 default = ""
 
+[vars.instructions_file]
+description = "Provider instructions file (e.g. CLAUDE.md, AGENTS.md). Used as fallback when gate commands are empty."
+default = "AGENTS.md"
+
 [vars.target_branch]
 description = "Default target branch for merges"
 default = "main"
@@ -202,6 +206,9 @@ If run_tests = "true":
 ```
 
 If run_tests = "false": skip tests entirely.
+
+If ALL commands above are empty, check the project's `{{instructions_file}}`
+for the quality gate commands to run (tests, linters, type checks, builds).
 
 Track results: which checks ran, pass/fail, specific failures.
 Close this step when all checks complete (pass or fail)."""

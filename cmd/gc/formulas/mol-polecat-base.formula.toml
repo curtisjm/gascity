@@ -50,6 +50,10 @@ default = ""
 description = "Command to run build. Empty = skip."
 default = ""
 
+[vars.instructions_file]
+description = "Provider instructions file (e.g. CLAUDE.md, AGENTS.md). Used as fallback when gate commands are empty."
+default = "AGENTS.md"
+
 [[steps]]
 id = "load-context"
 title = "Load context and verify assignment"
@@ -135,6 +139,9 @@ already verified on the prior attempt. Close this step and proceed.
 {{lint_command}}
 {{test_command}}
 ```
+
+If ALL commands above are empty, check your project's `{{instructions_file}}`
+for the quality gate commands to run (tests, linters, type checks, builds).
 
 **2. If pre-flights pass:** proceed.
 
@@ -231,6 +238,9 @@ debug cruft, unintended file changes. Fix anything you find.
 {{build_command}}
 {{test_command}}
 ```
+
+If ALL commands above are empty, check your project's `{{instructions_file}}`
+for the quality gate commands to run (tests, linters, type checks, builds).
 
 **ALL CHECKS MUST PASS.** If your change caused the failure, fix it.
 If pre-existing, file a bead.

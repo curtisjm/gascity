@@ -862,7 +862,36 @@ func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 		addVar("target_branch", autoBranch)
 	}
 
+	// Inject instructions_file from the agent's resolved provider so
+	// formulas can direct agents to check CLAUDE.md / AGENTS.md when
+	// pack-level quality gate commands are not configured.
+	addVar("instructions_file", instructionsFileForAgent(a, deps.Cfg))
+
 	return vars
+}
+
+// instructionsFileForAgent returns the provider instructions filename
+// (e.g. "CLAUDE.md", "AGENTS.md") for the given agent. Resolution:
+// agent.Provider > workspace.Provider > "AGENTS.md" default.
+func instructionsFileForAgent(a config.Agent, cfg *config.City) string {
+	name := a.Provider
+	if name == "" && cfg != nil {
+		name = cfg.Workspace.Provider
+	}
+	if name == "" {
+		return "AGENTS.md"
+	}
+	// City-level provider override wins.
+	if cfg != nil {
+		if spec, ok := cfg.Providers[name]; ok && spec.InstructionsFile != "" {
+			return spec.InstructionsFile
+		}
+	}
+	// Fall back to builtin provider specs.
+	if spec, ok := config.BuiltinProviders()[name]; ok && spec.InstructionsFile != "" {
+		return spec.InstructionsFile
+	}
+	return "AGENTS.md"
 }
 
 // slingFormulaSearchPaths returns the formula search paths for the current

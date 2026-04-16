@@ -43,6 +43,10 @@ default = ""
 description = "Optional test command"
 default = ""
 
+[vars.instructions_file]
+description = "Provider instructions file (e.g. CLAUDE.md, AGENTS.md). Used as fallback when gate commands are empty."
+default = "AGENTS.md"
+
 [[steps]]
 id = "load-context"
 title = "Load context and inspect the assignment"
@@ -115,6 +119,9 @@ Run the configured checks before implementation.
 {{lint_command}}
 {{test_command}}
 ```
+
+If ALL commands above are empty, check your project's `{{instructions_file}}`
+for the quality gate commands to run (tests, linters, type checks, builds).
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
@@ -151,6 +158,9 @@ git diff origin/{{base_branch}}...HEAD
 {{test_command}}
 git status
 ```
+
+If ALL quality check commands above are empty, check your project's
+`{{instructions_file}}` for the quality gate commands to run.
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 

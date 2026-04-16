@@ -3967,6 +3967,110 @@ func TestBuildSlingFormulaVarsInjectsIssueAndBaseBranch(t *testing.T) {
 	}
 }
 
+func TestBuildSlingFormulaVarsInjectsInstructionsFileFromProvider(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Provider: "claude"},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{Name: "polecat"}, deps)
+
+	if got, ok := findVarValue(vars, "instructions_file"); !ok || got != "CLAUDE.md" {
+		t.Fatalf("instructions_file var = %q, %v; want CLAUDE.md, true", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsInstructionsFileDefaultsToAgentsMd(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{Name: "polecat"}, deps)
+
+	if got, ok := findVarValue(vars, "instructions_file"); !ok || got != "AGENTS.md" {
+		t.Fatalf("instructions_file var = %q, %v; want AGENTS.md, true", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsInstructionsFileExplicitOverride(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Provider: "claude"},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42",
+		[]string{"instructions_file=CUSTOM.md"}, config.Agent{Name: "polecat"}, deps)
+
+	if got, ok := findVarValue(vars, "instructions_file"); !ok || got != "CUSTOM.md" {
+		t.Fatalf("instructions_file var = %q, %v; want CUSTOM.md, true", got, ok)
+	}
+}
+
+func TestInstructionsFileForAgent(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent config.Agent
+		cfg   *config.City
+		want  string
+	}{
+		{
+			name:  "claude provider",
+			agent: config.Agent{Provider: "claude"},
+			cfg:   &config.City{},
+			want:  "CLAUDE.md",
+		},
+		{
+			name:  "codex provider",
+			agent: config.Agent{Provider: "codex"},
+			cfg:   &config.City{},
+			want:  "AGENTS.md",
+		},
+		{
+			name:  "no provider defaults to AGENTS.md",
+			agent: config.Agent{},
+			cfg:   &config.City{},
+			want:  "AGENTS.md",
+		},
+		{
+			name:  "workspace provider fallback",
+			agent: config.Agent{},
+			cfg:   &config.City{Workspace: config.Workspace{Provider: "claude"}},
+			want:  "CLAUDE.md",
+		},
+		{
+			name:  "nil config defaults to AGENTS.md",
+			agent: config.Agent{},
+			cfg:   nil,
+			want:  "AGENTS.md",
+		},
+		{
+			name:  "city provider override",
+			agent: config.Agent{Provider: "claude"},
+			cfg: &config.City{
+				Providers: map[string]config.ProviderSpec{
+					"claude": {InstructionsFile: "CUSTOM.md"},
+				},
+			},
+			want: "CUSTOM.md",
+		},
+		{
+			name:  "agent provider wins over workspace",
+			agent: config.Agent{Provider: "codex"},
+			cfg:   &config.City{Workspace: config.Workspace{Provider: "claude"}},
+			want:  "AGENTS.md",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := instructionsFileForAgent(tt.agent, tt.cfg)
+			if got != tt.want {
+				t.Errorf("instructionsFileForAgent() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // --- 1-arg sling tests (via doSling, not cmdSling which needs a real city) ---
 
 func TestFindRigByPrefix(t *testing.T) {
