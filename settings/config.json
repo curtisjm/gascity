@@ -1,0 +1,10 @@
+{
+  "type": "rig-settings",
+  "version": 1,
+  "namepool": {
+    "style": "mad-max"
+  },
+  "worker_agents": {
+    "reviewer": "codex"
+  }
+}
