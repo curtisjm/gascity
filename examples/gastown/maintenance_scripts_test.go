@@ -1070,6 +1070,124 @@ func TestReaperParentIDIsParentChildDependencyProjection(t *testing.T) {
 	}
 }
 
+func TestReaperSupportsLegacyAndSplitDependencyTargetSchemas(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		schema       string
+		wantSQL      []string
+		forbiddenSQL []string
+	}{
+		{
+			name:   "legacy depends_on_id",
+			schema: "legacy",
+			wantSQL: []string{
+				"d.depends_on_id = parent_wisp.id",
+				"d.depends_on_id = parent_issue.id",
+				"SELECT DISTINCT d.depends_on_id",
+			},
+			forbiddenSQL: []string{"d.depends_on_issue_id", "d.depends_on_wisp_id"},
+		},
+		{
+			name:   "split target columns",
+			schema: "split",
+			wantSQL: []string{
+				"d.depends_on_wisp_id = parent_wisp.id",
+				"d.depends_on_issue_id = parent_issue.id",
+				"SELECT DISTINCT d.depends_on_wisp_id",
+				"INNER JOIN `beads`.issues i ON d.depends_on_issue_id = i.id",
+			},
+			forbiddenSQL: []string{"d.depends_on_id"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW COLUMNS FROM"*"dependencies"*)
+    case "$DOLT_DEP_SCHEMA" in
+      split)
+        printf 'Field\nissue_id\ndepends_on_issue_id\ndepends_on_wisp_id\ntype\n'
+        ;;
+      *)
+        printf 'Field\nissue_id\ndepends_on_id\ntype\n'
+        ;;
+    esac
+    ;;
+  *"COUNT(DISTINCT w.id)"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+			env := map[string]string{
+				"DOLT_DEP_SCHEMA":   tt.schema,
+				"DOLT_ARGS_LOG":     doltLog,
+				"GC_CALL_LOG":       gcLog,
+				"GC_REAPER_DRY_RUN": "1",
+				"GC_CITY":           cityDir,
+				"GC_CITY_PATH":      cityDir,
+				"GC_DOLT_HOST":      "127.0.0.1",
+				"GC_DOLT_PORT":      "3307",
+				"GC_DOLT_USER":      "root",
+				"GC_DOLT_PASSWORD":  "",
+				"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+
+			runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+			logData, err := os.ReadFile(doltLog)
+			if err != nil {
+				t.Fatalf("ReadFile(dolt log): %v", err)
+			}
+			log := string(logData)
+			for _, want := range tt.wantSQL {
+				if !strings.Contains(log, want) {
+					t.Fatalf("reaper SQL missing %q for %s schema:\n%s", want, tt.schema, log)
+				}
+			}
+			for _, forbidden := range tt.forbiddenSQL {
+				if strings.Contains(log, forbidden) {
+					t.Fatalf("reaper SQL used incompatible target column %q for %s schema:\n%s", forbidden, tt.schema, log)
+				}
+			}
+
+			gcData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(gc log): %v", err)
+			}
+			gcLogText := string(gcData)
+			if strings.Contains(gcLogText, "ESCALATION") || strings.Contains(gcLogText, "dependencies table lacks split target columns") {
+				t.Fatalf("reaper reported a schema anomaly for supported %s dependencies:\n%s", tt.schema, gcLogText)
+			}
+		})
+	}
+}
+
 func TestReaperSQLReflectsCurrentSchema(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()

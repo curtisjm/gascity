@@ -242,6 +242,54 @@ get_sql_rows() {
     SQL_ROWS_RESULT=$(printf '%s\n' "$output" | tail -n +2 | tr -d '\r')
 }
 
+DEPENDENCY_PARENT_WISP_TARGET="d.depends_on_id"
+DEPENDENCY_PARENT_ISSUE_TARGET="d.depends_on_id"
+
+column_list_contains() {
+    local needle="$1"
+    local column
+
+    while IFS= read -r column; do
+        if [ "$column" = "$needle" ]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+load_dependency_target_schema() {
+    local db="$1"
+    local output
+    local columns
+
+    DEPENDENCY_PARENT_WISP_TARGET="d.depends_on_id"
+    DEPENDENCY_PARENT_ISSUE_TARGET="d.depends_on_id"
+
+    if ! output=$(dolt_sql -r csv -q "SHOW COLUMNS FROM \`$db\`.dependencies" 2>/dev/null); then
+        return 0
+    fi
+
+    columns=$(printf '%s\n' "$output" | tail -n +2 | cut -d, -f1 | tr -d '\r')
+    if [ -z "$columns" ]; then
+        return 0
+    fi
+
+    if printf '%s\n' "$columns" | column_list_contains "depends_on_issue_id" &&
+        printf '%s\n' "$columns" | column_list_contains "depends_on_wisp_id"; then
+        DEPENDENCY_PARENT_WISP_TARGET="d.depends_on_wisp_id"
+        DEPENDENCY_PARENT_ISSUE_TARGET="d.depends_on_issue_id"
+        return 0
+    fi
+
+    if printf '%s\n' "$columns" | column_list_contains "depends_on_id"; then
+        return 0
+    fi
+
+    record_anomaly "$db" "dependencies table lacks supported target columns; dependency-aware reaper queries skipped"
+    return 1
+}
+
 SQL_CHANGE_ROWS_RESULT=0
 close_city_issue() {
     local issue_id="$1"
@@ -306,6 +354,9 @@ while IFS= read -r DB; do
         # server into noise. See gastownhall/gascity#1816.
         continue
     fi
+    if ! load_dependency_target_schema "$DB"; then
+        continue
+    fi
 
     DB_MUTATIONS=0
 
@@ -332,8 +383,8 @@ while IFS= read -r DB; do
             INNER JOIN \`$DB\`.dependencies d
                 ON d.issue_id = w.id
                 AND d.type = 'parent-child'
-            LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_id = parent_wisp.id
-            LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_id = parent_issue.id
+            LEFT JOIN \`$DB\`.wisps parent_wisp ON $DEPENDENCY_PARENT_WISP_TARGET = parent_wisp.id
+            LEFT JOIN \`$DB\`.issues parent_issue ON $DEPENDENCY_PARENT_ISSUE_TARGET = parent_issue.id
             WHERE w.status IN ('open', 'hooked', 'in_progress')
             AND w.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
             AND (
@@ -356,8 +407,8 @@ while IFS= read -r DB; do
                     INNER JOIN \`$DB\`.dependencies d
                         ON d.issue_id = w.id
                         AND d.type = 'parent-child'
-                    LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_id = parent_wisp.id
-                    LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_id = parent_issue.id
+                    LEFT JOIN \`$DB\`.wisps parent_wisp ON $DEPENDENCY_PARENT_WISP_TARGET = parent_wisp.id
+                    LEFT JOIN \`$DB\`.issues parent_issue ON $DEPENDENCY_PARENT_ISSUE_TARGET = parent_issue.id
                     WHERE w.status IN ('open', 'hooked', 'in_progress')
                     AND w.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
                     AND (
@@ -386,10 +437,10 @@ while IFS= read -r DB; do
         WHERE status = 'closed'
         AND closed_at < DATE_SUB(NOW(), INTERVAL $PURGE_AGE_H HOUR)
         AND id NOT IN (
-            SELECT DISTINCT d.depends_on_id FROM \`$DB\`.dependencies d
+            SELECT DISTINCT $DEPENDENCY_PARENT_WISP_TARGET FROM \`$DB\`.dependencies d
             INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
             WHERE d.type = 'parent-child'
-            AND d.depends_on_id IS NOT NULL
+            AND $DEPENDENCY_PARENT_WISP_TARGET IS NOT NULL
             AND child_wisp.status IN ('open', 'hooked', 'in_progress')
         )
     "
@@ -401,10 +452,10 @@ while IFS= read -r DB; do
             WHERE status = 'closed'
             AND closed_at < DATE_SUB(NOW(), INTERVAL $PURGE_AGE_H HOUR)
             AND id NOT IN (
-                SELECT DISTINCT d.depends_on_id FROM \`$DB\`.dependencies d
+                SELECT DISTINCT $DEPENDENCY_PARENT_WISP_TARGET FROM \`$DB\`.dependencies d
                 INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
                 WHERE d.type = 'parent-child'
-                AND d.depends_on_id IS NOT NULL
+                AND $DEPENDENCY_PARENT_WISP_TARGET IS NOT NULL
                 AND child_wisp.status IN ('open', 'hooked', 'in_progress')
             )
         "; then
@@ -425,12 +476,13 @@ while IFS= read -r DB; do
         AND issue_type != 'epic'
         AND id NOT IN (
             SELECT DISTINCT d.issue_id FROM \`$DB\`.dependencies d
-            INNER JOIN \`$DB\`.issues i ON d.depends_on_id = i.id
+            INNER JOIN \`$DB\`.issues i ON $DEPENDENCY_PARENT_ISSUE_TARGET = i.id
             WHERE i.status IN ('open', 'in_progress')
             UNION
-            SELECT DISTINCT d.depends_on_id FROM \`$DB\`.dependencies d
+            SELECT DISTINCT $DEPENDENCY_PARENT_ISSUE_TARGET FROM \`$DB\`.dependencies d
             INNER JOIN \`$DB\`.issues i ON d.issue_id = i.id
-            WHERE i.status IN ('open', 'in_progress')
+            WHERE $DEPENDENCY_PARENT_ISSUE_TARGET IS NOT NULL
+            AND i.status IN ('open', 'in_progress')
         )
     "
     STALE_IDS=$SQL_ROWS_RESULT
