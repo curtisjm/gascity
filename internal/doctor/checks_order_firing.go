@@ -19,20 +19,42 @@ const (
 	orderFiringInspectHintFmt = "Inspect with: gc order check && gc order history %s"
 )
 
+// OrderFiringCurrentLastRunFunc reports the newest persisted run time for an order.
+type OrderFiringCurrentLastRunFunc func(order orders.Order) (time.Time, error)
+
+// OrderFiringCurrentOption configures the scheduled-order freshness check.
+type OrderFiringCurrentOption func(*OrderFiringCurrentCheck)
+
+// WithOrderFiringCurrentLastRunFunc lets callers provide the same order-run
+// bead history used by the dispatcher. The check still reads order.fired
+// events and uses the newer of the two sources.
+func WithOrderFiringCurrentLastRunFunc(fn OrderFiringCurrentLastRunFunc) OrderFiringCurrentOption {
+	return func(c *OrderFiringCurrentCheck) {
+		c.lastRunAt = fn
+	}
+}
+
 // OrderFiringCurrentCheck reports scheduled orders whose last firing is stale.
 type OrderFiringCurrentCheck struct {
-	cfg      *config.City
-	cityPath string
-	clock    func() time.Time
+	cfg       *config.City
+	cityPath  string
+	clock     func() time.Time
+	lastRunAt OrderFiringCurrentLastRunFunc
 }
 
 // NewOrderFiringCurrentCheck creates a check for cron and cooldown order freshness.
-func NewOrderFiringCurrentCheck(cfg *config.City, cityPath string) *OrderFiringCurrentCheck {
-	return &OrderFiringCurrentCheck{
+func NewOrderFiringCurrentCheck(cfg *config.City, cityPath string, opts ...OrderFiringCurrentOption) *OrderFiringCurrentCheck {
+	check := &OrderFiringCurrentCheck{
 		cfg:      cfg,
 		cityPath: cityPath,
 		clock:    time.Now,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(check)
+		}
+	}
+	return check
 }
 
 // Name returns the check identifier shown by gc doctor.
@@ -60,6 +82,12 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 	if cityPath == "" {
 		result.Status = StatusError
 		result.Message = "city path unavailable"
+		return result
+	}
+
+	if c.cfg.Workspace.Suspended {
+		result.Status = StatusOK
+		result.Message = "city suspended; scheduled order freshness skipped"
 		return result
 	}
 
@@ -100,6 +128,9 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
 			continue
 		}
+		if orderFiringCurrentOrderSuspended(c.cfg, order) {
+			continue
+		}
 		monitored++
 		expected, err := expectedIntervalForOrder(order, cronIntervals)
 		if err != nil {
@@ -111,7 +142,17 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		status, severity, detail := classifyOrderFiring(order, now, expected, latestOrderFiredAt(firedEvents, order.ScopedName()), startedAt)
+		lastFired, err := c.latestOrderFiredAt(firedEvents, order)
+		if err != nil {
+			worst = worseStatus(worst, StatusError)
+			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
+			if firstNonOK == "" {
+				firstNonOK = orderHistoryHintTarget(order)
+			}
+			blockingErrors++
+			continue
+		}
+		status, severity, detail := classifyOrderFiring(order, now, expected, lastFired, startedAt)
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
@@ -153,11 +194,129 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 func scanOrderFiringCurrentOrders(cityPath string, cfg *config.City) ([]orders.Order, error) {
-	allOrders, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{})
+	scanCfg := orderFiringCurrentScanConfig(cfg)
+	scanCfg = orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath, cfg, scanCfg)
+	allOrders, err := orderdiscovery.ScanAll(cityPath, scanCfg, orderdiscovery.ScanOptions{})
 	if err != nil {
 		return nil, err
 	}
 	return orders.FilterEnabled(allOrders), nil
+}
+
+func orderFiringCurrentScanConfig(cfg *config.City) *config.City {
+	if cfg == nil {
+		return nil
+	}
+	suspended := orderFiringCurrentSuspendedRigs(cfg)
+	if len(suspended) == 0 {
+		return cfg
+	}
+	clone := *cfg
+	if len(cfg.FormulaLayers.Rigs) > 0 {
+		clone.FormulaLayers.Rigs = make(map[string][]string, len(cfg.FormulaLayers.Rigs))
+		for rigName, layers := range cfg.FormulaLayers.Rigs {
+			if suspended[rigName] {
+				continue
+			}
+			clone.FormulaLayers.Rigs[rigName] = layers
+		}
+	}
+	if len(cfg.RigPackDirs) > 0 {
+		clone.RigPackDirs = make(map[string][]string, len(cfg.RigPackDirs))
+		for rigName, dirs := range cfg.RigPackDirs {
+			if suspended[rigName] {
+				continue
+			}
+			clone.RigPackDirs[rigName] = dirs
+		}
+	}
+	if len(cfg.Orders.Overrides) > 0 {
+		clone.Orders.Overrides = make([]config.OrderOverride, 0, len(cfg.Orders.Overrides))
+		for _, override := range cfg.Orders.Overrides {
+			if suspended[strings.TrimSpace(override.Rig)] {
+				continue
+			}
+			clone.Orders.Overrides = append(clone.Orders.Overrides, override)
+		}
+	}
+	return &clone
+}
+
+func orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath string, originalCfg, scanCfg *config.City) *config.City {
+	if originalCfg == nil || scanCfg == nil || len(scanCfg.Orders.Overrides) == 0 {
+		return scanCfg
+	}
+	suspended := orderFiringCurrentSuspendedRigs(originalCfg)
+	if len(suspended) == 0 {
+		return scanCfg
+	}
+	activeOrders, err := orderFiringCurrentScanWithoutOverrides(cityPath, scanCfg)
+	if err != nil {
+		return scanCfg
+	}
+	allOrders, err := orderFiringCurrentScanWithoutOverrides(cityPath, originalCfg)
+	if err != nil {
+		return scanCfg
+	}
+	activeNames := map[string]bool{}
+	for _, order := range activeOrders {
+		activeNames[order.Name] = true
+	}
+	suspendedOnlyNames := map[string]bool{}
+	for _, order := range allOrders {
+		if order.Name == "" || !suspended[order.Rig] || activeNames[order.Name] {
+			continue
+		}
+		suspendedOnlyNames[order.Name] = true
+	}
+	if len(suspendedOnlyNames) == 0 {
+		return scanCfg
+	}
+	clone := *scanCfg
+	clone.Orders.Overrides = make([]config.OrderOverride, 0, len(scanCfg.Orders.Overrides))
+	for _, override := range scanCfg.Orders.Overrides {
+		if strings.TrimSpace(override.Rig) == orders.RigWildcard && suspendedOnlyNames[strings.TrimSpace(override.Name)] {
+			continue
+		}
+		clone.Orders.Overrides = append(clone.Orders.Overrides, override)
+	}
+	return &clone
+}
+
+func orderFiringCurrentScanWithoutOverrides(cityPath string, cfg *config.City) ([]orders.Order, error) {
+	if cfg == nil {
+		return orderdiscovery.ScanAll(cityPath, nil, orderdiscovery.ScanOptions{})
+	}
+	clone := *cfg
+	clone.Orders.Overrides = nil
+	return orderdiscovery.ScanAll(cityPath, &clone, orderdiscovery.ScanOptions{})
+}
+
+func orderFiringCurrentSuspendedRigs(cfg *config.City) map[string]bool {
+	out := make(map[string]bool)
+	if cfg == nil {
+		return out
+	}
+	for _, rig := range cfg.Rigs {
+		if rig.Suspended && strings.TrimSpace(rig.Name) != "" {
+			out[rig.Name] = true
+		}
+	}
+	return out
+}
+
+func orderFiringCurrentOrderSuspended(cfg *config.City, order orders.Order) bool {
+	if cfg == nil {
+		return false
+	}
+	suspended := orderFiringCurrentSuspendedRigs(cfg)
+	if suspended[order.Rig] {
+		return true
+	}
+	if rigName, _ := config.ParseQualifiedName(order.Pool); rigName != "" && suspended[rigName] {
+		return true
+	}
+	return false
 }
 
 func expectedIntervalForOrder(order orders.Order, cronCache map[string]time.Duration) (time.Duration, error) {
@@ -384,6 +543,21 @@ func latestOrderFiredAt(evts []events.Event, subject string) time.Time {
 		}
 	}
 	return latest
+}
+
+func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order) (time.Time, error) {
+	latest := latestOrderFiredAt(evts, order.ScopedName())
+	if c.lastRunAt == nil {
+		return latest, nil
+	}
+	lastRun, err := c.lastRunAt(order)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if lastRun.After(latest) {
+		latest = lastRun
+	}
+	return latest, nil
 }
 
 func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
