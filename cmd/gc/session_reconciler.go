@@ -2189,9 +2189,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				_ = store.SetMetadata(target.session.ID, "sleep_intent", "")
 				target.session.Metadata["sleep_intent"] = ""
 			}
+			maybeNudgeActiveSessionForAssignedWork(ctx, cityPath, cfg, store, sp, target.session, assignedWorkBeads, clk, stderr)
 		}
 
 		if !shouldWake && target.alive {
+			clearAssignedWorkNudgeSignatureIfNoMatchingWork(cfg, store, target.session, assignedWorkBeads, stderr)
 			// No reason to be awake — begin drain.
 			intent := target.session.Metadata["sleep_intent"]
 			var reason string
