@@ -108,12 +108,44 @@ func liveListQuery(query ListQuery) ListQuery {
 // active cache only covers the issue tier while order-run callers need an exact
 // issues+wisp union.
 func (c *CachingStore) ListAnyLabel(labels []string, query ListQuery) ([]Bead, error) {
+	labels, allBare := uniqueBareBDQueryLabels(labels)
+	if len(labels) == 0 {
+		return []Bead{}, nil
+	}
 	if lister, ok := c.backing.(interface {
 		ListAnyLabel([]string, ListQuery) ([]Bead, error)
 	}); ok {
 		return lister.ListAnyLabel(labels, liveListQuery(query))
 	}
-	return c.List(query)
+
+	liveQuery := liveListQuery(query)
+	liveQuery.Limit = 0
+	if !allBare {
+		liveQuery.AllowScan = true
+		rows, err := c.List(liveQuery)
+		if err != nil {
+			return nil, err
+		}
+		return ApplyListQuery(filterBeadsWithAnyLabel(rows, labels), query), nil
+	}
+	merged := make([]Bead, 0, len(labels))
+	seen := make(map[string]struct{})
+	for _, label := range labels {
+		labelQuery := liveQuery
+		labelQuery.Label = label
+		rows, err := c.List(labelQuery)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			if _, ok := seen[row.ID]; ok {
+				continue
+			}
+			seen[row.ID] = struct{}{}
+			merged = append(merged, row)
+		}
+	}
+	return ApplyListQuery(merged, query), nil
 }
 
 // CachedList returns query results from the in-memory cache only. The boolean

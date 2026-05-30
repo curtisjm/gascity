@@ -6629,6 +6629,54 @@ func TestOrderDispatchTrackingBeadIsEphemeral(t *testing.T) {
 // guard for the single-flight lock after the tracking bead moved to the wisps
 // tier. If the batched order-run state query were not tier-aware, the
 // dispatcher would re-fire the same cooldown order on the next tick.
+type injectOpenWorkOnStrictCheckStore struct {
+	beads.Store
+	scoped   string
+	injected bool
+}
+
+func (s *injectOpenWorkOnStrictCheckStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if !s.injected && query.Label == "order-run:"+s.scoped && query.TierMode == beads.TierBoth && !query.IncludeClosed {
+		s.injected = true
+		if _, err := s.Create(beads.Bead{
+			Title:     "order:" + s.scoped,
+			Labels:    []string{"order-run:" + s.scoped, labelOrderTracking},
+			Ephemeral: true,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return s.Store.List(query)
+}
+
+func TestOrderDispatchSecondGateReReadsLiveOpenWorkBeforeCreate(t *testing.T) {
+	store := &injectOpenWorkOnStrictCheckStore{Store: beads.NewMemStore(), scoped: "race"}
+	var execCalls int
+	execRun := func(context.Context, string, string, []string) ([]byte, error) {
+		execCalls++
+		return nil, nil
+	}
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:     "race",
+		Trigger:  "cooldown",
+		Interval: "1s",
+		Exec:     "true",
+	}}, store, nil, execRun, nil)
+	if ad == nil {
+		t.Fatal("expected dispatcher")
+	}
+	ad.dispatch(context.Background(), t.TempDir(), time.Now().Add(2*time.Second))
+	ad.drain(context.Background())
+
+	if execCalls != 0 {
+		t.Fatalf("execCalls = %d, want 0 because live second gate observed concurrent open work", execCalls)
+	}
+	all := trackingBeads(t, store, "order-run:race")
+	if len(all) != 1 {
+		t.Fatalf("tracking beads = %#v, want only externally injected work", all)
+	}
+}
+
 func TestOrderDispatchSingleFlightLockSeesEphemeralTracker(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{

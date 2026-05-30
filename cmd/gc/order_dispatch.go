@@ -497,8 +497,11 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 		}
 
-		// Skip dispatch if previous work hasn't been processed yet.
-		hasOpenWork, err = stateCache.hasOpenWorkInStores(storesForGate, scoped)
+		// Skip dispatch if previous work hasn't been processed yet. Re-read
+		// live here instead of reusing the per-tick batched snapshot: another
+		// controller/API/manual path can create order-run work after trigger
+		// evaluation but before this controller creates its tracking bead.
+		hasOpenWork, err = m.hasOpenWorkInStoresStrict(storesForGate, scoped)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
 			continue
@@ -1117,6 +1120,19 @@ func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 // cooldown gate from pouring duplicate wisps when the pool stalls
 // (tr-kds01, where 24h-interval digest wisps accumulated because the
 // pool never picked them up).
+func (m *memoryOrderDispatcher) hasOpenWorkInStoresStrict(stores []beads.Store, scopedName string) (bool, error) {
+	for i, store := range stores {
+		hasOpen, err := m.hasOpenWorkStrict(store, scopedName)
+		if err != nil {
+			return false, fmt.Errorf("store %d: %w", i, err)
+		}
+		if hasOpen {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName string) (bool, error) {
 	results, err := store.List(beads.ListQuery{
 		Label: "order-run:" + scopedName,

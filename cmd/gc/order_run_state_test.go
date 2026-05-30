@@ -81,6 +81,43 @@ func TestOrderCheckBatchesRunStateAcrossLegacyStores(t *testing.T) {
 	}
 }
 
+func TestLoadOrderRunStoreStateFallbackFiltersRequestedLabels(t *testing.T) {
+	store := beads.NewMemStore()
+	wanted, err := store.Create(beads.Bead{
+		Title:  "wanted run",
+		Labels: []string{"order-run:wanted"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "unrelated run",
+		Labels: []string{"order-run:other"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "unrelated cursor",
+		Labels: []string{"order:other", "seq:99"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := loadOrderRunStoreState(store, []string{"order-run:wanted"})
+	if err != nil {
+		t.Fatalf("loadOrderRunStoreState: %v", err)
+	}
+	if got := state.lastRun["wanted"]; !got.Equal(wanted.CreatedAt) {
+		t.Fatalf("wanted lastRun = %s, want %s", got, wanted.CreatedAt)
+	}
+	if _, ok := state.lastRun["other"]; ok {
+		t.Fatalf("unrequested order run was observed: %#v", state.lastRun)
+	}
+	if _, ok := state.cursor["other"]; ok {
+		t.Fatalf("unrequested cursor was observed: %#v", state.cursor)
+	}
+}
+
 func TestOrderDispatchBatchesOpenWorkHistoryAndCursors(t *testing.T) {
 	store := &orderRunStateCountingStore{Store: beads.NewMemStore()}
 	if _, err := store.Create(beads.Bead{

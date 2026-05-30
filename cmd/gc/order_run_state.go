@@ -110,6 +110,9 @@ func loadOrderRunStoreState(store beads.Store, labels []string) (*orderRunStoreS
 		rows, err = lister.ListAnyLabel(labels, query)
 	} else {
 		rows, err = store.List(query)
+		if len(labels) > 0 {
+			rows = filterOrderRunStateRows(rows, labels)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("listing order run state: %w", err)
@@ -122,6 +125,36 @@ func loadOrderRunStoreState(store beads.Store, labels []string) (*orderRunStoreS
 		return nil, err
 	}
 	return state, nil
+}
+
+func filterOrderRunStateRows(rows []beads.Bead, labels []string) []beads.Bead {
+	if len(labels) == 0 || len(rows) == 0 {
+		return rows
+	}
+	want := make(map[string]struct{}, len(labels))
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			continue
+		}
+		want[label] = struct{}{}
+	}
+	out := rows[:0]
+	for _, row := range rows {
+		if beadLabelsIntersect(row.Labels, want) {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func beadLabelsIntersect(labels []string, want map[string]struct{}) bool {
+	for _, label := range labels {
+		if _, ok := want[label]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *orderRunStoreState) observe(b beads.Bead) {

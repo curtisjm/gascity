@@ -739,6 +739,15 @@ func TestOrderCheckWithStoresResolverUsesLegacyCityStore(t *testing.T) {
 	}
 }
 
+func TestOrderSetHasConditionOrder(t *testing.T) {
+	if orderSetHasConditionOrder([]orders.Order{{Name: "poll", Trigger: "condition"}}) != true {
+		t.Fatal("condition order was not detected")
+	}
+	if orderSetHasConditionOrder([]orders.Order{{Name: "tick", Trigger: "cooldown", Interval: "1m"}}) != false {
+		t.Fatal("non-condition order was treated as condition")
+	}
+}
+
 func TestOrderCheckConditionUsesCityScope(t *testing.T) {
 	cityDir := t.TempDir()
 	orderDir := filepath.Join(cityDir, "packs", "workflows", "orders")

@@ -172,6 +172,60 @@ func TestCachingStoreListLiveBypassesCache(t *testing.T) {
 	}
 }
 
+func TestCachingStoreListAnyLabelFallbackHonorsLabels(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	alpha, err := backing.Create(Bead{Title: "alpha", Labels: []string{"wanted-alpha"}})
+	if err != nil {
+		t.Fatalf("Create alpha: %v", err)
+	}
+	beta, err := backing.Create(Bead{Title: "beta", Labels: []string{"wanted-beta"}})
+	if err != nil {
+		t.Fatalf("Create beta: %v", err)
+	}
+	spaced, err := backing.Create(Bead{Title: "spaced", Labels: []string{"wanted spaced"}})
+	if err != nil {
+		t.Fatalf("Create spaced: %v", err)
+	}
+	if _, err := backing.Create(Bead{Title: "gamma", Labels: []string{"other"}}); err != nil {
+		t.Fatalf("Create gamma: %v", err)
+	}
+	if _, ok := any(backing).(interface {
+		ListAnyLabel([]string, ListQuery) ([]Bead, error)
+	}); ok {
+		t.Fatal("backing unexpectedly implements ListAnyLabel; test must exercise caching-store fallback")
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	got, err := cache.ListAnyLabel([]string{"wanted-beta", "wanted-alpha", "wanted-alpha"}, ListQuery{})
+	if err != nil {
+		t.Fatalf("ListAnyLabel: %v", err)
+	}
+	gotIDs := map[string]bool{}
+	for _, bead := range got {
+		gotIDs[bead.ID] = true
+		if bead.ID != alpha.ID && bead.ID != beta.ID {
+			t.Fatalf("ListAnyLabel returned unrelated bead: %+v", bead)
+		}
+	}
+	if !gotIDs[alpha.ID] || !gotIDs[beta.ID] || len(gotIDs) != 2 {
+		t.Fatalf("ListAnyLabel IDs = %#v, want exactly %s and %s", gotIDs, alpha.ID, beta.ID)
+	}
+
+	got, err = cache.ListAnyLabel([]string{"wanted spaced"}, ListQuery{})
+	if err != nil {
+		t.Fatalf("ListAnyLabel(non-bare): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != spaced.ID {
+		t.Fatalf("ListAnyLabel(non-bare) = %+v, want %s", got, spaced.ID)
+	}
+}
+
 func TestCachingStoreApplyEventRecordsBackingVerificationErrorAndAppliesUpdate(t *testing.T) {
 	t.Parallel()
 
