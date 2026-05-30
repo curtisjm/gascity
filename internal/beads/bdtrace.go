@@ -93,11 +93,11 @@ func classifyTraceScope(callers []string) string {
 		case strings.Contains(fn, "memoryOrderDispatcher).dispatch"),
 			strings.Contains(fn, "memoryOrderDispatcher).hasOpenWork"),
 			strings.Contains(fn, "memoryOrderDispatcher).cachedLastRun"),
+			strings.Contains(fn, "orderRunStateCache"),
 			strings.Contains(fn, "dispatchOrders"),
 			strings.Contains(fn, "orders.LastRunFuncForStore"),
 			strings.Contains(fn, "orders.LastRunAcrossStores"),
 			strings.Contains(fn, "orders.CursorAcrossStores"),
-			strings.Contains(fn, "bdCursorAcrossStores"),
 			strings.Contains(fn, "doOrderCheck"):
 			return "order-dispatch"
 

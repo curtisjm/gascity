@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/spf13/cobra"
@@ -169,12 +170,16 @@ func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stde
 		stderr = io.Discard
 	}
 	resolveStores := cachedOrderHistoryStoresResolver(cityPath, cfg, stderr)
+	stateCache := newOrderRunStateCache()
+	if allOrders, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{}); err == nil {
+		stateCache = newOrderRunStateCacheForOrders(orders.FilterEnabled(allOrders))
+	}
 	return func(order orders.Order) (time.Time, error) {
 		stores, err := resolveStores(order)
 		if err != nil {
 			return time.Time{}, err
 		}
-		return orders.LastRunAcrossStores(stores...)(order.ScopedName())
+		return stateCache.lastRunAcrossStores(order.ScopedName(), stores...)
 	}
 }
 

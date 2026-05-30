@@ -1415,6 +1415,29 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	return s.listViaBDList(query)
 }
 
+// ListAnyLabel returns beads matching any exact label in labels plus the other
+// ListQuery filters. It is an optional batch-read fast path for callers that
+// would otherwise issue one List call per label.
+func (s *BdStore) ListAnyLabel(labels []string, query ListQuery) ([]Bead, error) {
+	labels, ok := uniqueBareBDQueryLabels(labels)
+	if len(labels) == 0 {
+		return []Bead{}, nil
+	}
+	if !ok {
+		return s.listAnyLabelViaScan(labels, query)
+	}
+
+	switch query.TierMode {
+	case TierWisps:
+		return s.listAnyLabelViaBDQuery(labels, query, true)
+	default:
+		// bd query returns both durable issues and ephemeral wisps for label
+		// expressions. Client-side ListQuery filtering below preserves TierIssues
+		// and TierBoth semantics without a second backend process.
+		return s.listAnyLabelViaBDQuery(labels, query, false)
+	}
+}
+
 func bdListCoversBothTiers(query ListQuery) bool {
 	return query.Type == "message"
 }
@@ -1526,6 +1549,113 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 		return filtered, fmt.Errorf("bd query: %w", parseErr)
 	}
 	return filtered, nil
+}
+
+func (s *BdStore) listAnyLabelViaBDQuery(labels []string, query ListQuery, wisps bool) ([]Bead, error) {
+	clauses := []string{bdAnyLabelQueryExpr(labels)}
+	if wisps {
+		clauses = append([]string{"ephemeral=true"}, clauses...)
+	}
+	serverFilteredOnly := true
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "status", query.Status)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "type", query.Type)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "assignee", query.Assignee)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "parent", query.ParentID)
+
+	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
+	if query.IncludeClosed || query.Status == "closed" {
+		args = append(args, "--all")
+	}
+	limit := 0
+	if query.Limit > 0 && serverFilteredOnly && canApplyWispsServerLimit(query) {
+		limit = query.Limit
+	}
+	args = append(args, "--limit", strconv.Itoa(limit))
+
+	out, err := s.runner(s.dir, "bd", args...)
+	if err != nil {
+		return nil, fmt.Errorf("bd query any label: %w", err)
+	}
+	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	result := make([]Bead, len(issues))
+	for i := range issues {
+		result[i] = issues[i].toBead()
+		if wisps {
+			result[i].Ephemeral = true
+		}
+	}
+	result = filterBeadsWithAnyLabel(result, labels)
+	filtered := applyListQuery(result, query)
+	if parseErr != nil {
+		if len(filtered) > 0 {
+			return filtered, &PartialResultError{Op: "bd query", Err: parseErr}
+		}
+		return filtered, fmt.Errorf("bd query: %w", parseErr)
+	}
+	return filtered, nil
+}
+
+func (s *BdStore) listAnyLabelViaScan(labels []string, query ListQuery) ([]Bead, error) {
+	scanQuery := query
+	scanQuery.AllowScan = true
+	rows, err := s.List(scanQuery)
+	return filterBeadsWithAnyLabel(rows, labels), err
+}
+
+func uniqueBareBDQueryLabels(labels []string) ([]string, bool) {
+	seen := make(map[string]struct{}, len(labels))
+	out := make([]string, 0, len(labels))
+	allBare := true
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			continue
+		}
+		if !isBareBdQueryValue(label) {
+			allBare = false
+		}
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		out = append(out, label)
+	}
+	sort.Strings(out)
+	return out, allBare
+}
+
+func bdAnyLabelQueryExpr(labels []string) string {
+	parts := make([]string, len(labels))
+	for i, label := range labels {
+		parts[i] = "label=" + label
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return "(" + strings.Join(parts, " OR ") + ")"
+}
+
+func filterBeadsWithAnyLabel(rows []Bead, labels []string) []Bead {
+	want := make(map[string]struct{}, len(labels))
+	for _, label := range labels {
+		want[label] = struct{}{}
+	}
+	out := rows[:0]
+	for _, row := range rows {
+		if beadHasAnyLabel(row, want) {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func beadHasAnyLabel(row Bead, want map[string]struct{}) bool {
+	for _, label := range row.Labels {
+		if _, ok := want[label]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func canApplyWispsServerLimit(query ListQuery) bool {

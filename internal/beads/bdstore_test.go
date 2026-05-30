@@ -3260,3 +3260,38 @@ func TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues(t *testi
 		})
 	}
 }
+
+func TestBdStoreListAnyLabelBatchesTierBothInOneQuery(t *testing.T) {
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return []byte(`[
+			{"id":"bd-run","title":"run","status":"closed","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["order-run:digest"]},
+			{"id":"bd-cursor","title":"cursor","status":"closed","issue_type":"task","created_at":"2026-05-01T00:00:01Z","ephemeral":true,"labels":["order:watch","seq:7"]},
+			{"id":"bd-other","title":"other","status":"closed","issue_type":"task","created_at":"2026-05-01T00:00:02Z","labels":["unrelated"]}
+		]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	got, err := s.ListAnyLabel([]string{"order:watch", "order-run:digest"}, beads.ListQuery{
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+		Sort:          beads.SortCreatedDesc,
+	})
+	if err != nil {
+		t.Fatalf("ListAnyLabel: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("backend calls = %d (%v), want one batched query", len(calls), calls)
+	}
+	wantExpr := "bd query --json (label=order-run:digest OR label=order:watch) --all --limit 0"
+	if calls[0] != wantExpr {
+		t.Fatalf("call = %q, want %q", calls[0], wantExpr)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListAnyLabel returned %d rows, want 2: %+v", len(got), got)
+	}
+	if got[0].ID != "bd-cursor" || got[1].ID != "bd-run" {
+		t.Fatalf("ListAnyLabel rows = %+v, want created-desc filtered order", got)
+	}
+}
