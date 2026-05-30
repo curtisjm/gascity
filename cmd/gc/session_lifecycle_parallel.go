@@ -1420,6 +1420,14 @@ func commitStartResultTraced(
 					"error": formatLifecycleError(result.err),
 				}, "")
 			}
+			// Count real pending-create startup failures before rollback closes
+			// the bead. Configured named sessions reopen the same bead, so the
+			// wake-failure quarantine survives and interrupts create-timeout loops.
+			// Controller shutdown/cancellation and runtime-name collisions are not
+			// agent startup failures.
+			if shouldRecordPendingCreateWakeFailure(result.err) {
+				recordWakeFailure(session, store, clk)
+			}
 			rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
 			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 			return false
@@ -1631,6 +1639,16 @@ func runningSessionMatchesPendingCreate(session *beads.Bead, sessionName string,
 		return false
 	}
 	return expectedToken != "" && liveToken == expectedToken
+}
+
+func shouldRecordPendingCreateWakeFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, runtime.ErrSessionExists) {
+		return false
+	}
+	return true
 }
 
 func rollbackPendingCreate(session *beads.Bead, store beads.Store, now time.Time, stderr io.Writer) {

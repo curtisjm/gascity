@@ -163,7 +163,11 @@ are not in the desired set:
 **Dependency-aware bounded parallel starts** (Phase 1b): The bead-driven
 session reconciler plans starts serially, groups them into dependency
 waves, runs each wave with bounded parallelism, then applies
-success/failure side effects serially in stable plan order.
+success/failure side effects serially in stable plan order. Startup
+failures that abort a pending-create bead before `creation_complete` count as
+wake failures before the failed-create rollback closes the bead; configured
+named sessions preserve that retry metadata across reopen and enter the normal
+short quarantine after the retry threshold instead of retrying forever.
 
 **Dependency-aware bounded force-stops**: Bulk stop paths (`gc stop`,
 controller shutdown, provider swap, `gc rig restart`) send interrupts to

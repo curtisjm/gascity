@@ -30,6 +30,10 @@ func resolveRigForDir(cfg *config.City, cityPath, dir string) (config.Rig, bool,
 }
 
 func rigFromRedirectedBeadsDir(cfg *config.City, cityPath, dir string) (config.Rig, bool, error) {
+	cityRoot := normalizePathForCompare(cityPath)
+	if cityRoot == "" || !pathWithinScope(dir, cityRoot) {
+		return config.Rig{}, false, nil
+	}
 	for current := dir; current != "" && current != filepath.Dir(current); current = filepath.Dir(current) {
 		redirectPath := filepath.Join(current, ".beads", "redirect")
 		redirectTarget, err := os.ReadFile(redirectPath)

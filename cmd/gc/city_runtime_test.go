@@ -466,6 +466,9 @@ func TestCityRuntimeRunStartupPreflightsManagedDoltBeforeSessionSnapshot(t *test
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
 	t.Setenv("GC_BEADS", "bd")
+	// This test injects a custom managed-Dolt health preflight, so keep the
+	// real lifecycle helper from spawning a Dolt sql-server during setup.
+	t.Setenv("GC_DOLT", "skip")
 
 	cfg, err := config.Load(osFS{}, tomlPath)
 	if err != nil {

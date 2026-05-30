@@ -3414,6 +3414,79 @@ func TestCommitStartResult_SessionInitializingClearsInFlightLease(t *testing.T) 
 	}
 }
 
+func TestCommitStartResult_RollbackPendingErrorRecordsWakeFailureBeforeClose(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 30, 8, 15, 0, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-slow-start",
+		Title:  "slow-start",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "slow-start",
+			"template":             "slow-start",
+			"generation":           "2",
+			"continuation_epoch":   "1",
+			"instance_token":       "tok-slow-start",
+			"pending_create_claim": "true",
+			"last_woke_at":         clk.Now().Add(-time.Minute).Format(time.RFC3339),
+			"wake_attempts":        "4",
+			"session_key":          "stale-start-key",
+			"started_config_hash":  "stale-hash",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				session: &session,
+				tp: TemplateParams{
+					Command:      "pi slow-start",
+					SessionName:  "slow-start",
+					TemplateName: "slow-start",
+				},
+			},
+		},
+		err:             context.DeadlineExceeded,
+		outcome:         "deadline_exceeded",
+		started:         clk.Now().Add(-time.Minute),
+		finished:        clk.Now(),
+		rollbackPending: true,
+	}
+
+	if commitStartResult(result, store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}) {
+		t.Fatal("rollback-pending error should not count as committed")
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("status = %q, want closed", updated.Status)
+	}
+	if got := updated.Metadata["wake_attempts"]; got != "5" {
+		t.Fatalf("wake_attempts = %q, want 5", got)
+	}
+	qUntil, err := time.Parse(time.RFC3339, updated.Metadata["quarantined_until"])
+	if err != nil {
+		t.Fatalf("quarantined_until parse: %v", err)
+	}
+	if want := clk.Now().Add(defaultQuarantineDuration); !qUntil.Equal(want) {
+		t.Fatalf("quarantined_until = %s, want %s", qUntil.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+	if got := updated.Metadata["session_key"]; got != "" {
+		t.Fatalf("session_key = %q, want cleared before retry", got)
+	}
+	if got := updated.Metadata["started_config_hash"]; got != "" {
+		t.Fatalf("started_config_hash = %q, want cleared before retry", got)
+	}
+	if got := updated.Metadata["continuation_reset_pending"]; got != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", got)
+	}
+}
+
 func TestCommitStartResult_RollbackPendingErrorClearsInFlightLeaseWhenCloseFails(t *testing.T) {
 	store := &failingCloseStore{MemStore: beads.NewMemStore()}
 	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 13, 0, 0, 0, time.UTC)}
