@@ -27,6 +27,16 @@ expanded to their open children before routing.
   placeholder is replaced with the actual bead ID at dispatch time.
   Defined in `internal/config/config.go:EffectiveSlingQuery`.
 
+- **Named-Session Handoff**: Direct handoff to a named session, such as a
+  refinery merge queue, is represented by `assignee=<qualified-name>` with
+  `gc.routed_to` cleared. Pool demand is represented by unassigned work with
+  `gc.routed_to=<qualified-name>`. To avoid waiting for the next event/patrol
+  interval after a direct handoff, callers should wake or nudge the named
+  session; the assignment is still persistent and will be picked up on the
+  next poll if the signal is missed. Real refinery merge handoffs must carry
+  the implementation branch in `metadata.branch`; `review_branch` is a
+  review-only convention and is intentionally ignored by merge automation.
+
 - **Container Expansion**: When a convoy is slung, dispatch expands it
   to its open children and routes each child individually. Non-open
   children are skipped. Epics are ordinary beads and are not expanded.
