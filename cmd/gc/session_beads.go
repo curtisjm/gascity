@@ -1043,6 +1043,16 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				meta["pending_create_claim"] = "true"
 				meta["pending_create_started_at"] = pendingCreateStartedAtNow(now)
 			}
+			if isConfiguredNamed {
+				retryMeta, err := failedCreateRetryMetadataForConfiguredNamedSession(store, tp.ConfiguredNamedIdentity)
+				if err != nil {
+					fmt.Fprintf(stderr, "session beads: loading failed-create retry metadata for %s: %v\n", agentName, err) //nolint:errcheck
+				} else {
+					for key, value := range retryMeta {
+						meta[key] = value
+					}
+				}
+			}
 			if tp.DependencyOnly {
 				meta["dependency_only"] = boolMetadata(true)
 			}
@@ -1731,6 +1741,36 @@ func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr 
 		return err
 	}
 	return nil
+}
+
+func failedCreateRetryMetadataForConfiguredNamedSession(store beads.Store, identity string) (map[string]string, error) {
+	identity = strings.TrimSpace(identity)
+	if store == nil || identity == "" {
+		return nil, nil
+	}
+	candidates, err := store.List(beads.ListQuery{
+		Metadata: map[string]string{
+			namedSessionIdentityMetadata: identity,
+		},
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range candidates {
+		if candidate.Status != "closed" || strings.TrimSpace(candidate.Metadata["state"]) != string(session.StateFailedCreate) {
+			continue
+		}
+		meta := map[string]string{}
+		for _, key := range []string{"wake_attempts", "quarantined_until", "sleep_reason"} {
+			if value := strings.TrimSpace(candidate.Metadata[key]); value != "" {
+				meta[key] = value
+			}
+		}
+		return meta, nil
+	}
+	return nil, nil
 }
 
 func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr io.Writer) bool {

@@ -6361,8 +6361,11 @@ func TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError(t *testing.
 	if got.Metadata["state"] != "failed-create" {
 		t.Fatalf("state = %q, want %q", got.Metadata["state"], "failed-create")
 	}
-	if got.Metadata["wake_attempts"] != "" {
-		t.Fatalf("wake_attempts = %q, want empty", got.Metadata["wake_attempts"])
+	if got.Metadata["wake_attempts"] != "1" {
+		t.Fatalf("wake_attempts = %q, want 1", got.Metadata["wake_attempts"])
+	}
+	if got.Metadata["quarantined_until"] != "" {
+		t.Fatalf("quarantined_until = %q, want empty below retry threshold", got.Metadata["quarantined_until"])
 	}
 }
 

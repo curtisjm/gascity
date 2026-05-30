@@ -308,6 +308,35 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 	}
 }
 
+func TestResolveBdScopeTargetIgnoresForeignRedirectOutsideCity(t *testing.T) {
+	cityDir := t.TempDir()
+	foreignRoot := filepath.Join(t.TempDir(), "foreign")
+	foreignCwd := filepath.Join(foreignRoot, "checkout")
+	if err := os.MkdirAll(filepath.Join(foreignCwd, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(foreign .beads): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(foreignCwd, ".beads", "redirect"), []byte(filepath.Join(foreignRoot, "target", ".beads")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(redirect): %v", err)
+	}
+	setCwd(t, foreignCwd)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gascity"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: filepath.Join("rigs", "frontend"), Prefix: "fr"}},
+	}
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"})
+	if err != nil {
+		t.Fatalf("resolveBdScopeTarget() error = %v", err)
+	}
+	want := execStoreTarget{
+		ScopeRoot: cityDir,
+		ScopeKind: "city",
+		Prefix:    "ga",
+	}
+	if got != want {
+		t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+	}
+}
+
 func TestBdCommandEnvUsesCanonicalRigTarget(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")

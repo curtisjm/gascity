@@ -30,6 +30,11 @@ global_fragments = ["command-glossary", "operational-awareness"]
 [defaults.rig.imports.gastown]
 source = "packs/gastown"
 
+[session]
+# Fresh named sessions can take longer than 60s to initialize on slower
+# provider hosts; keep the example tolerant without disabling those sessions.
+startup_timeout = "2m"
+
 [daemon]
 patrol_interval = "30s"
 max_restarts = 5

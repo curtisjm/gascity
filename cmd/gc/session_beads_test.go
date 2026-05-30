@@ -628,6 +628,94 @@ func TestSyncSessionBeads_DoesNotCreateFallbackForConfiguredNamedConflict(t *tes
 	}
 }
 
+func TestSyncSessionBeads_CarriesFailedCreateQuarantineToReplacementNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	quarantineUntil := clk.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)
+	failed, err := store.Create(beads.Bead{
+		Title:  "myrig/witness",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"state":                      string(session.StateFailedCreate),
+			"session_name":               "",
+			namedSessionMetadataKey:      boolMetadata(true),
+			namedSessionIdentityMetadata: "myrig/witness",
+			namedSessionModeMetadata:     "on_demand",
+			"wake_attempts":              "4",
+			"quarantined_until":          quarantineUntil,
+			"sleep_reason":               "quarantine",
+			"pending_create_claim":       "",
+			"pending_create_started_at":  "",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create failed-create bead: %v", err)
+	}
+	if err := store.Close(failed.ID); err != nil {
+		t.Fatalf("Close failed-create bead: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "witness", Dir: "myrig"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "witness", Dir: "myrig"},
+		},
+	}
+	desired := map[string]TemplateParams{
+		"myrig--witness": {
+			TemplateName:            "myrig/witness",
+			InstanceName:            "myrig/witness",
+			Alias:                   "myrig/witness",
+			Command:                 "claude",
+			ConfiguredNamedIdentity: "myrig/witness",
+			ConfiguredNamedMode:     "on_demand",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false)
+
+	all, err := store.List(beads.ListQuery{Label: sessionBeadLabel, IncludeClosed: true, Sort: beads.SortCreatedAsc})
+	if err != nil {
+		t.Fatalf("List session beads: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("session bead count = %d, want failed-create plus replacement; all=%#v stderr=%s", len(all), all, stderr.String())
+	}
+	var replacement beads.Bead
+	for _, bead := range all {
+		if bead.Status != "closed" {
+			replacement = bead
+		}
+	}
+	if replacement.ID == "" {
+		t.Fatalf("replacement named session was not created; all=%#v stderr=%s", all, stderr.String())
+	}
+	if replacement.ID == failed.ID {
+		t.Fatal("failed-create bead was reopened instead of replaced")
+	}
+	if got := replacement.Metadata["wake_attempts"]; got != "4" {
+		t.Fatalf("wake_attempts = %q, want 4", got)
+	}
+	if got := replacement.Metadata["quarantined_until"]; got != quarantineUntil {
+		t.Fatalf("quarantined_until = %q, want %q", got, quarantineUntil)
+	}
+	if got := replacement.Metadata["sleep_reason"]; got != "quarantine" {
+		t.Fatalf("sleep_reason = %q, want quarantine", got)
+	}
+	if got := replacement.Metadata["state"]; got != string(session.StateStartPending) {
+		t.Fatalf("state = %q, want %q", got, string(session.StateStartPending))
+	}
+	if got := replacement.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", got)
+	}
+}
+
 func TestSyncSessionBeads_RetiresRemovedNamedSessionAndCreatesFreshOnReadd(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}

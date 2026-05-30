@@ -20,6 +20,27 @@ gc doctor --verbose   # extra detail
 gc doctor --fix       # attempt automatic repairs
 ```
 
+## Session Startup Timeouts
+
+If controller logs show repeated session startup failures such as
+`startup: context deadline exceeded` with `start_call=1m0s`, the provider
+process is taking longer than Gas City's default startup window. This is most
+common on slower hosts or when several fresh provider sessions start at once.
+
+Raise the session startup window before disabling the agent:
+
+```toml
+[session]
+startup_timeout = "2m"
+```
+
+Keep `[daemon].max_wakes_per_tick` above `1` unless you intentionally want
+serial starts; the default is `5`, so one slow session cannot consume every
+startup slot. If a configured named session still fails to create repeatedly,
+Gas City records those pending-create failures as wake failures and applies
+the normal short quarantine after the retry threshold instead of retrying
+forever.
+
 ## Add City-Local Doctor Checks
 
 Use `[[doctor.check]]` in `city.toml` for a workspace-specific health check
