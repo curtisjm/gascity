@@ -23,8 +23,7 @@ expanded to their open children before routing.
 
 - **Sling Query**: A shell command template on each agent config
   (`sling_query`) that routes a bead to that agent. Defaults to
-  `bd update {} --assignee=<qualified-name>` for fixed agents and
-  `bd update {} --label=pool:<qualified-name>` for pool agents. The `{}`
+  `bd update {} --set-metadata gc.routed_to=<qualified-name>`. The `{}`
   placeholder is replaced with the actual bead ID at dispatch time.
   Defined in `internal/config/config.go:EffectiveSlingQuery`.
 
@@ -42,10 +41,13 @@ expanded to their open children before routing.
   and routes the wisp's root bead to the target. Variable substitution
   and custom titles are supported.
 
-- **Target Resolution**: The 2-step resolution of agent names -- first
-  literal match against qualified names, then contextual match using the
-  current rig directory. Implemented in
-  `cmd/gc/cmd_agent.go:resolveAgentIdentity`.
+- **Target Resolution**: The 3-step resolution of agent names -- contextual
+  match using the caller's current rig/session context, literal match against
+  qualified names, then unambiguous bare-name match. Managed sessions provide
+  context through `GC_DIR`, `GC_RIG_ROOT`, and `GC_RIG` so commands from
+  isolated `.gc/worktrees/...` directories still resolve rig-scoped bare
+  targets. Implemented in `cmd/gc/cmd_agent.go:resolveAgentIdentity` and
+  `currentRigContext`.
 
 - **System Formula**: A formula embedded in the `gc` binary that is
   materialized to `.gc/system-formulas/` at startup. System formulas
