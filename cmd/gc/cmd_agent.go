@@ -394,11 +394,26 @@ func findAgentByQualified(cfg *config.City, identity string) (config.Agent, bool
 }
 
 // currentRigContext returns the rig name that provides context for bare agent
-// name resolution. Checks GC_DIR env var first, then cwd.
+// name resolution. Checks injected session context first, then cwd.
 func currentRigContext(cfg *config.City) string {
+	if cfg == nil {
+		return ""
+	}
 	if gcDir := os.Getenv("GC_DIR"); gcDir != "" {
 		if name, _, found := findEnclosingRig(gcDir, cfg.Rigs); found {
 			return name
+		}
+	}
+	if rigRoot := os.Getenv("GC_RIG_ROOT"); rigRoot != "" {
+		if name, _, found := findEnclosingRig(rigRoot, cfg.Rigs); found {
+			return name
+		}
+	}
+	if rigName := strings.TrimSpace(os.Getenv("GC_RIG")); rigName != "" {
+		for _, rig := range cfg.Rigs {
+			if rig.Name == rigName {
+				return rig.Name
+			}
 		}
 	}
 	if cwd, err := os.Getwd(); err == nil {

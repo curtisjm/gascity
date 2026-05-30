@@ -6455,6 +6455,27 @@ func TestCurrentRigContextUsesWorkingDirThroughSymlinkAlias(t *testing.T) {
 	}
 }
 
+func TestCurrentRigContextUsesInjectedRigWhenSessionWorkDirIsOutsideRig(t *testing.T) {
+	tmp := t.TempDir()
+	rigPath := filepath.Join(tmp, "frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	isolatedWorkDir := filepath.Join(tmp, ".gc", "worktrees", "frontend", "sessions", "operator")
+	if err := os.MkdirAll(isolatedWorkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "frontend", Path: rigPath}},
+	}
+
+	t.Setenv("GC_DIR", isolatedWorkDir)
+	t.Setenv("GC_RIG", "frontend")
+	if got := currentRigContext(cfg); got != "frontend" {
+		t.Fatalf("currentRigContext() = %q, want %q", got, "frontend")
+	}
+}
+
 // --- doAgentAdd with --dir and --suspended ---
 
 func TestDoAgentAddWithDir(t *testing.T) {
