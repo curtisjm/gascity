@@ -825,12 +825,138 @@ func cmdOrderCheck(jsonOutput bool, stdout, stderr io.Writer) int {
 		return code
 	}
 
+	c, reason := orderCheckAPIClient(cityPath)
+	return routeOrderCheck(cityPath, cfg, aa, c, reason, jsonOutput, stdout, stderr)
+}
+
+var orderCheckAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+func routeOrderCheck(cityPath string, cfg *config.City, aa []orders.Order, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
+	const cmdName = "order check"
+	if c != nil {
+		checks, err := c.GetOrderCheck(false)
+		if err == nil {
+			logRoute(stderr, cmdName, "api", "")
+			return renderOrderCheckFromAPI(aa, checks, jsonOutput, stdout, stderr)
+		}
+		if !api.ShouldFallbackForRead(err) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
+
 	ep, epCode := openCityEventsProvider(stderr, "gc order check")
 	if ep == nil {
 		return epCode
 	}
 	defer ep.Close() //nolint:errcheck // best-effort
 	return doOrderCheckWithStoresResolverScopedJSON(cityPath, cfg, aa, time.Now(), ep, cachedOrderStoresResolver(cityPath, cfg), jsonOutput, stdout, stderr)
+}
+
+func renderOrderCheckFromAPI(aa []orders.Order, checks []api.OrderCheckView, jsonOutput bool, stdout, stderr io.Writer) int {
+	triggerByScoped := orderTriggerByScopedName(aa)
+	if len(checks) == 0 {
+		if jsonOutput {
+			if writeCLIJSONLineOrExit(stdout, stderr, "gc order check", orderCheckJSON{
+				SchemaVersion: "1",
+				OK:            true,
+				AnyDue:        false,
+				OrdersTotal:   0,
+				DueTotal:      0,
+				Orders:        []orderCheckJSONRow{},
+			}) != 0 {
+				return 1
+			}
+			return 1
+		}
+		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
+		return 1
+	}
+
+	if jsonOutput {
+		result := orderCheckJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			OrdersTotal:   len(checks),
+			Orders:        make([]orderCheckJSONRow, 0, len(checks)),
+		}
+		for _, check := range checks {
+			if check.Due {
+				result.AnyDue = true
+				result.DueTotal++
+			}
+			result.Orders = append(result.Orders, orderCheckJSONRow{
+				Name:       check.Name,
+				Rig:        check.Rig,
+				ScopedName: check.ScopedName,
+				Trigger:    triggerByScoped[check.ScopedName],
+				Due:        check.Due,
+				Reason:     check.Reason,
+			})
+		}
+		if writeCLIJSONLineOrExit(stdout, stderr, "gc order check", result) != 0 {
+			return 1
+		}
+		if result.AnyDue {
+			return 0
+		}
+		return 1
+	}
+
+	hasRig := anyOrderCheckHasRig(checks)
+	if hasRig {
+		fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", "NAME", "TRIGGER", "RIG", "DUE", "REASON") //nolint:errcheck
+	} else {
+		fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", "NAME", "TRIGGER", "DUE", "REASON") //nolint:errcheck
+	}
+	anyDue := false
+	for _, check := range checks {
+		due := "no"
+		if check.Due {
+			due = "yes"
+			anyDue = true
+		}
+		trigger := triggerByScoped[check.ScopedName]
+		if hasRig {
+			rig := check.Rig
+			if rig == "" {
+				rig = "-"
+			}
+			fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", check.Name, trigger, rig, due, check.Reason) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", check.Name, trigger, due, check.Reason) //nolint:errcheck
+		}
+	}
+	if anyDue {
+		return 0
+	}
+	return 1
+}
+
+func orderTriggerByScopedName(aa []orders.Order) map[string]string {
+	out := make(map[string]string, len(aa))
+	for _, order := range aa {
+		out[order.ScopedName()] = order.Trigger
+	}
+	return out
+}
+
+func anyOrderCheckHasRig(checks []api.OrderCheckView) bool {
+	for _, check := range checks {
+		if check.Rig != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // orderLastRunFn returns a LastRunFunc that queries BdStore for the most
@@ -971,6 +1097,8 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 		return 1
 	}
 
+	stateCache := newOrderRunStateCacheForOrders(aa)
+
 	if jsonOutput {
 		result := orderCheckJSON{
 			SchemaVersion: "1",
@@ -984,7 +1112,7 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			baseLastRunFn := orders.LastRunAcrossStores(stores...)
+			baseLastRunFn := stateCache.lastRunFunc(stores)
 			var lastRunErr error
 			lastRunFn := func(orderName string) (time.Time, error) {
 				last, err := baseLastRunFn(orderName)
@@ -993,9 +1121,9 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 				}
 				return last, err
 			}
-			cursorFn := orders.CursorAcrossStores(stores...)
+			var cursorFn orders.CursorFunc
 			if a.Trigger == "event" {
-				cursor, err := bdCursorAcrossStores(a.ScopedName(), stores...)
+				cursor, err := stateCache.cursorAcrossStores(a.ScopedName(), stores...)
 				if err != nil {
 					fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 					return 1
@@ -1049,7 +1177,7 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		baseLastRunFn := orders.LastRunAcrossStores(stores...)
+		baseLastRunFn := stateCache.lastRunFunc(stores)
 		var lastRunErr error
 		lastRunFn := func(orderName string) (time.Time, error) {
 			last, err := baseLastRunFn(orderName)
@@ -1058,9 +1186,9 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			}
 			return last, err
 		}
-		cursorFn := orders.CursorAcrossStores(stores...)
+		var cursorFn orders.CursorFunc
 		if a.Trigger == "event" {
-			cursor, err := bdCursorAcrossStores(a.ScopedName(), stores...)
+			cursor, err := stateCache.cursorAcrossStores(a.ScopedName(), stores...)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 				return 1
@@ -1597,21 +1725,4 @@ func bdCursor(store beads.Store, orderName string) (uint64, error) {
 		labelSets[i] = b.Labels
 	}
 	return orders.MaxSeqFromLabels(labelSets), nil
-}
-
-func bdCursorAcrossStores(orderName string, stores ...beads.Store) (uint64, error) {
-	var maxSeq uint64
-	for i, store := range stores {
-		if store == nil {
-			continue
-		}
-		seq, err := bdCursor(store, orderName)
-		if err != nil {
-			return 0, fmt.Errorf("store %d: %w", i, err)
-		}
-		if seq > maxSeq {
-			maxSeq = seq
-		}
-	}
-	return maxSeq, nil
 }

@@ -80,6 +80,7 @@ type countingListStore struct {
 	beads.Store
 
 	includeClosedLists int
+	stateScans         int
 }
 
 func TestScanOrderSetSnapshotFSTracksAddChangeRemove(t *testing.T) {
@@ -216,7 +217,10 @@ func (s triggerEvaluationFailStore) List(query beads.ListQuery) ([]beads.Bead, e
 }
 
 func (s *countingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.IncludeClosed || query.Status == "closed" {
+	if query.AllowScan && query.IncludeClosed && query.TierMode == beads.TierBoth && query.Label == "" {
+		s.stateScans++
+	}
+	if query.Label != "" && (query.IncludeClosed || query.Status == "closed") {
 		s.includeClosedLists++
 	}
 	return s.Store.List(query)
@@ -224,6 +228,7 @@ func (s *countingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 
 func (s *countingListStore) reset() {
 	s.includeClosedLists = 0
+	s.stateScans = 0
 }
 
 func (s *createdAtOverrideStore) Create(b beads.Bead) (beads.Bead, error) {
@@ -1234,14 +1239,14 @@ func TestOrderDispatchCachesLastRunBetweenDispatches(t *testing.T) {
 	cityPath := t.TempDir()
 	now := time.Now()
 	ad.dispatch(context.Background(), cityPath, now)
-	if store.includeClosedLists == 0 {
-		t.Fatal("first dispatch did not read persisted order history")
+	if store.stateScans == 0 {
+		t.Fatal("first dispatch did not read persisted order state")
 	}
 
 	store.reset()
 	ad.dispatch(context.Background(), cityPath, now.Add(time.Second))
-	if store.includeClosedLists != 0 {
-		t.Fatalf("second dispatch performed %d closed-history reads, want cached last-run result", store.includeClosedLists)
+	if store.stateScans != 1 || store.includeClosedLists != 0 {
+		t.Fatalf("second dispatch state scans=%d exact closed-history reads=%d, want one batched state scan and no per-order history read", store.stateScans, store.includeClosedLists)
 	}
 
 	all, _ := store.ListOpen()
@@ -1276,8 +1281,8 @@ func TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch(t *testing.T) {
 
 	cityPath := t.TempDir()
 	ad.dispatch(context.Background(), cityPath, now)
-	if store.includeClosedLists == 0 {
-		t.Fatal("first dispatch did not read persisted order history")
+	if store.stateScans == 0 {
+		t.Fatal("first dispatch did not read persisted order state")
 	}
 
 	store.reset()
@@ -1290,8 +1295,11 @@ func TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch(t *testing.T) {
 	}
 
 	ad.dispatch(context.Background(), cityPath, now.Add(31*time.Minute))
-	if store.includeClosedLists == 0 {
-		t.Fatal("due cached dispatch did not refresh persisted order history")
+	if store.stateScans == 0 {
+		t.Fatal("due cached dispatch did not refresh persisted order state")
+	}
+	if store.includeClosedLists != 0 {
+		t.Fatalf("due cached dispatch performed %d per-order history reads, want batched state refresh", store.includeClosedLists)
 	}
 
 	all := trackingBeads(t, store, "order-run:test-order")
@@ -1324,8 +1332,8 @@ func TestOrderDispatchCachesAutoTrackingBeadCreatedAt(t *testing.T) {
 
 	store.reset()
 	ad.dispatch(context.Background(), cityPath, now.Add(time.Second))
-	if store.includeClosedLists != 0 {
-		t.Fatalf("second dispatch performed %d closed-history reads, want cached tracking bead timestamp", store.includeClosedLists)
+	if store.stateScans != 1 || store.includeClosedLists != 0 {
+		t.Fatalf("second dispatch state scans=%d exact closed-history reads=%d, want one batched state scan and no per-order history read", store.stateScans, store.includeClosedLists)
 	}
 	all = trackingBeads(t, store, "order-run:test-order")
 	if len(all) != 1 {
@@ -4210,10 +4218,18 @@ type labelFailListStore struct {
 }
 
 func (s labelFailListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Label == s.failLabel {
-		return nil, fmt.Errorf("list failed for %s", query.Label)
+	if query.Label == s.failLabel || (isOrderRunStateScan(query) && isOrderRunStateLabel(s.failLabel)) {
+		return nil, fmt.Errorf("list failed for %s", s.failLabel)
 	}
 	return s.Store.List(query)
+}
+
+func isOrderRunStateScan(query beads.ListQuery) bool {
+	return query.AllowScan && query.IncludeClosed && query.TierMode == beads.TierBoth && query.Label == ""
+}
+
+func isOrderRunStateLabel(label string) bool {
+	return strings.HasPrefix(label, "order-run:") || strings.HasPrefix(label, "order:")
 }
 
 // --- helpers ---
@@ -4924,8 +4940,8 @@ func TestOrderDispatchSkipsRigEventWhenLegacyCursorReadFails(t *testing.T) {
 	if len(rigRuns) != 0 {
 		t.Fatalf("rig store has %d new run bead(s), want 0 when legacy event cursor cannot be read", len(rigRuns))
 	}
-	if !strings.Contains(stderr.String(), "event cursor") {
-		t.Fatalf("stderr missing event cursor error:\n%s", stderr.String())
+	if !strings.Contains(stderr.String(), "open work") {
+		t.Fatalf("stderr missing order state error:\n%s", stderr.String())
 	}
 }
 
@@ -6610,10 +6626,9 @@ func TestOrderDispatchTrackingBeadIsEphemeral(t *testing.T) {
 }
 
 // TestOrderDispatchSingleFlightLockSeesEphemeralTracker is the regression
-// guard for the single-flight lock (`hasOpenWorkInStoresStrict`) after the
-// tracking bead moved to the wisps tier. If the lock query were not
-// tier-aware, the dispatcher would re-fire the same cooldown order on the
-// next tick.
+// guard for the single-flight lock after the tracking bead moved to the wisps
+// tier. If the batched order-run state query were not tier-aware, the
+// dispatcher would re-fire the same cooldown order on the next tick.
 func TestOrderDispatchSingleFlightLockSeesEphemeralTracker(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{

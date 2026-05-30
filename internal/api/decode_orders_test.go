@@ -87,3 +87,36 @@ func TestOrderHistoryFromGenList_PartialMissingFields(t *testing.T) {
 		t.Errorf("BeadID = %q, want ca-7", got[0].BeadID)
 	}
 }
+
+func TestOrderChecksFromGenList(t *testing.T) {
+	rig := "frontend"
+	lastRun := "2026-05-30T07:00:00Z"
+	outcome := "exec"
+	items := []genclient.OrderCheckResponse{
+		{Name: "digest", ScopedName: "digest:rig:frontend", Rig: &rig, Due: false, Reason: "cooldown", LastRun: &lastRun, LastRunOutcome: &outcome},
+		{Name: "watch", ScopedName: "watch", Due: true, Reason: "event"},
+	}
+	body := &genclient.OrderCheckListBody{Checks: &items}
+
+	got := orderChecksFromGenList(body)
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	want0 := OrderCheckView{Name: "digest", ScopedName: "digest:rig:frontend", Rig: "frontend", Due: false, Reason: "cooldown", LastRun: lastRun, LastRunOutcome: outcome}
+	if got[0] != want0 {
+		t.Fatalf("got[0] = %+v, want %+v", got[0], want0)
+	}
+	want1 := OrderCheckView{Name: "watch", ScopedName: "watch", Due: true, Reason: "event"}
+	if got[1] != want1 {
+		t.Fatalf("got[1] = %+v, want %+v", got[1], want1)
+	}
+}
+
+func TestOrderChecksFromGenListEmpty(t *testing.T) {
+	if got := orderChecksFromGenList(nil); got == nil || len(got) != 0 {
+		t.Fatalf("nil body = %+v, want empty non-nil", got)
+	}
+	if got := orderChecksFromGenList(&genclient.OrderCheckListBody{}); got == nil || len(got) != 0 {
+		t.Fatalf("nil checks = %+v, want empty non-nil", got)
+	}
+}

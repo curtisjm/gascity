@@ -374,6 +374,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	}
 
 	stores := make(map[string]beads.Store)
+	stateCache := newOrderRunStateCacheForOrders(m.aa)
 
 	for _, a := range m.aa {
 		// Skip orders targeting suspended rigs.
@@ -411,7 +412,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			storeKeysForGate = append(storeKeysForGate, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
 		}
 		scoped := a.ScopedName()
-		hasOpenWork, err := m.hasOpenWorkInStoresStrict(storesForGate, scoped)
+		hasOpenWork, err := stateCache.hasOpenWorkInStores(storesForGate, scoped)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
 			continue
@@ -420,7 +421,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 
-		baseLastRunFn := orders.LastRunAcrossStores(storesForGate...)
+		baseLastRunFn := stateCache.lastRunFunc(storesForGate)
 		var lastRunErr error
 		var lastRunFromCache bool
 		lastRunFn := func(orderName string) (time.Time, error) {
@@ -433,9 +434,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 			return last, err
 		}
-		cursorFn := orders.CursorAcrossStores(storesForGate...)
+		var cursorFn orders.CursorFunc
 		if a.Trigger == "event" {
-			cursor, err := bdCursorAcrossStores(a.ScopedName(), storesForGate...)
+			cursor, err := stateCache.cursorAcrossStores(a.ScopedName(), storesForGate...)
 			if err != nil {
 				logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", a.ScopedName(), err)
 				continue
@@ -460,6 +461,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 				logDispatchError(m.stderr, "gc: order dispatch: creating trigger env failure tracking bead for %s: %v", scoped, createErr)
 			} else {
 				m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
+				stateCache.rememberOpenRun(store, scoped, trackingBead.CreatedAt)
 			}
 			m.rec.Record(events.Event{
 				Type:    events.OrderFailed,
@@ -496,7 +498,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 
 		// Skip dispatch if previous work hasn't been processed yet.
-		hasOpenWork, err = m.hasOpenWorkInStoresStrict(storesForGate, scoped)
+		hasOpenWork, err = stateCache.hasOpenWorkInStores(storesForGate, scoped)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
 			continue
@@ -517,6 +519,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 		m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
+		stateCache.rememberOpenRun(store, scoped, trackingBead.CreatedAt)
 
 		// Fire with timeout; inflight tracks the spawned goroutine so
 		// drain can wait for tracking-bead outcome persistence before
@@ -1190,22 +1193,6 @@ func storeHasOpenDescendants(store beads.Store, parentID string) (bool, error) {
 				return true, nil
 			}
 			queue = append(queue, c.ID)
-		}
-	}
-	return false, nil
-}
-
-func (m *memoryOrderDispatcher) hasOpenWorkInStoresStrict(stores []beads.Store, scopedName string) (bool, error) {
-	for _, store := range stores {
-		if store == nil {
-			continue
-		}
-		hasOpen, err := m.hasOpenWorkStrict(store, scopedName)
-		if err != nil {
-			return false, err
-		}
-		if hasOpen {
-			return true, nil
 		}
 	}
 	return false, nil

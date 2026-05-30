@@ -103,6 +103,19 @@ func liveListQuery(query ListQuery) ListQuery {
 	return query
 }
 
+// ListAnyLabel returns beads matching any exact label using the backing store's
+// batch-label fast path when available. The caching layer delegates because its
+// active cache only covers the issue tier while order-run callers need an exact
+// issues+wisp union.
+func (c *CachingStore) ListAnyLabel(labels []string, query ListQuery) ([]Bead, error) {
+	if lister, ok := c.backing.(interface {
+		ListAnyLabel([]string, ListQuery) ([]Bead, error)
+	}); ok {
+		return lister.ListAnyLabel(labels, liveListQuery(query))
+	}
+	return c.List(query)
+}
+
 // CachedList returns query results from the in-memory cache only. The boolean
 // reports whether the cache was initialized enough to answer without touching
 // the backing store. Dirty entries are returned from the last observed

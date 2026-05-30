@@ -439,6 +439,29 @@ func (c *Client) ListServices() ([]workspacesvc.Status, error) {
 	return out, nil
 }
 
+// GetOrderCheck fetches all order trigger evaluations via
+// GET /v0/city/{cityName}/orders/check.
+func (c *Client) GetOrderCheck(fresh bool) ([]OrderCheckView, error) {
+	if err := c.requireCityScope(); err != nil {
+		return nil, err
+	}
+	params := &genclient.GetV0CityByCityNameOrdersCheckParams{}
+	if fresh {
+		params.Fresh = &fresh
+	}
+	resp, err := c.cw.GetV0CityByCityNameOrdersCheckWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return nil, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return nil, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return nil, err
+	}
+	return orderChecksFromGenList(resp.JSON200), nil
+}
+
 // GetOrderHistory fetches order run history via
 // GET /v0/city/{cityName}/orders/history. scopedName is required (the
 // handler returns 400 when empty); limit=0 selects the server default;
