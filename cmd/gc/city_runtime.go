@@ -750,6 +750,14 @@ func (cr *CityRuntime) tick(
 		manualReply = cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, trace, source)
 		if manualReload != nil {
 			manualReloadCompleted = true
+			// Failed reloads keep the old config, so there is no new desired
+			// state for the tick to prove. Free the manual reload slot before
+			// later reconciliation work can stall or panic and block retries.
+			if manualReply.Outcome == reloadOutcomeFailed {
+				cr.sendReloadReply(manualReload.doneCh, manualReply)
+				manualReloadReplied = true
+				cr.activeReload = nil
+			}
 		}
 	}
 	if ctx.Err() != nil {
@@ -842,7 +850,7 @@ func (cr *CityRuntime) tick(
 
 	// Convergence tick: process active convergence loops.
 	cr.convergenceTick(ctx)
-	if manualReload != nil {
+	if manualReload != nil && !manualReloadReplied {
 		cr.sendReloadReply(manualReload.doneCh, manualReply)
 		manualReloadReplied = true
 		cr.activeReload = nil

@@ -482,35 +482,51 @@ func TestCityRuntimeRunStartupPreflightsManagedDoltBeforeSessionSnapshot(t *test
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cr := newTestCityRuntime(t, CityRuntimeParams{
-		CityPath: cityPath,
-		CityName: "test-city",
-		TomlPath: tomlPath,
-		Cfg:      cfg,
-		SP:       sp,
-		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+	cr := &CityRuntime{
+		cityPath:       cityPath,
+		cityName:       "test-city",
+		configName:     "test-city",
+		tomlPath:       tomlPath,
+		cfg:            cfg,
+		sp:             sp,
+		dops:           newDrainOps(sp),
+		rec:            events.Discard,
+		poolSessions:   map[string]time.Duration{},
+		suspendedNames: map[string]bool{},
+		buildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
-		Dops: newDrainOps(sp),
-		Rec:  events.Discard,
-		OnStarted: func() {
+		pokeCh:              make(chan struct{}, 1),
+		reloadReqCh:         make(chan reloadRequest),
+		controlDispatcherCh: make(chan struct{}, 1),
+		nudgeWakeCh:         make(chan struct{}, 1),
+		asyncStartLimiter:   newAsyncStartLimiter(maxParallelStartsPerTick(cfg)),
+		onStarted: func() {
 			cancel()
 		},
-		ManagedDoltHealth: func(string) error {
+		managedDoltHealth: func(string) error {
 			orderEvents.record("preflight")
 			return nil
 		},
-		ManagedDoltOwned: func(string) (bool, error) {
+		managedDoltOwned: func(string) (bool, error) {
 			return true, nil
 		},
-		ManagedDoltPort: func(string) string {
+		managedDoltPort: func(string) string {
 			return managedPort
 		},
-		Stdout: io.Discard,
-		Stderr: io.Discard,
-	})
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
-	cs.cityBeadStore = store
+		logPrefix: "gc start",
+		stdout:    io.Discard,
+		stderr:    io.Discard,
+	}
+	cs := &controllerState{
+		cfg:           cfg,
+		sp:            sp,
+		eventProv:     events.NewFake(),
+		cityName:      "test-city",
+		cityPath:      cityPath,
+		cityBeadStore: store,
+		beadStores:    map[string]beads.Store{},
+	}
 	cr.setControllerState(cs)
 	orderEvents.reset()
 	managedPort = ""
@@ -3650,6 +3666,93 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 	}
 	if cr.activeReload != nil {
 		t.Fatal("activeReload was not cleared")
+	}
+}
+
+func TestCityRuntimeManualReloadFailureRepliesAndClearsBeforeReconcile(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	doneCh := make(chan reloadControlReply, 1)
+	dirty := &atomic.Bool{}
+	dirty.Store(true)
+	sp := runtime.NewFake()
+	replySeenDuringBuild := false
+	var buildErr string
+	var cr *CityRuntime
+	cr = &CityRuntime{
+		cityPath:     cityPath,
+		cityName:     "test-city",
+		tomlPath:     tomlPath,
+		configRev:    configRev,
+		configDirty:  dirty,
+		cfg:          cfg,
+		sp:           sp,
+		dops:         newDrainOps(sp),
+		rec:          events.Discard,
+		logPrefix:    "gc start",
+		stdout:       io.Discard,
+		stderr:       io.Discard,
+		configName:   "test-city",
+		poolSessions: map[string]time.Duration{},
+		buildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			select {
+			case reply := <-doneCh:
+				replySeenDuringBuild = true
+				if reply.Outcome != reloadOutcomeFailed {
+					buildErr = fmt.Sprintf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeFailed)
+				}
+				if reply.Error == "" && buildErr == "" {
+					buildErr = "reply.Error is empty, want reload failure details"
+				}
+			default:
+				buildErr = "manual reload failure was not replied before desired-state rebuild"
+			}
+			if cr.activeReload != nil && buildErr == "" {
+				buildErr = "activeReload was not cleared before desired-state rebuild after reload failure"
+			}
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+	}
+	cr.activeReload = &reloadRequest{doneCh: doneCh}
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname =\n"), 0o644); err != nil {
+		t.Fatalf("write invalid config: %v", err)
+	}
+	lastProviderName := "fake"
+	var prevPoolRunning map[string]bool
+
+	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke")
+
+	if buildErr != "" {
+		t.Fatal(buildErr)
+	}
+	if cr.activeReload != nil {
+		t.Fatal("activeReload was not cleared after reload failure")
+	}
+	if !replySeenDuringBuild {
+		select {
+		case reply := <-doneCh:
+			if reply.Outcome != reloadOutcomeFailed {
+				t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeFailed)
+			}
+			if reply.Error == "" {
+				t.Fatal("reply.Error is empty, want reload failure details")
+			}
+		default:
+			t.Fatal("manual reload failure did not reply")
+		}
+	}
+	select {
+	case reply := <-doneCh:
+		t.Fatalf("unexpected duplicate reload reply: %+v", reply)
+	default:
 	}
 }
 
