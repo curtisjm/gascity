@@ -492,6 +492,49 @@ schema = 2
 	}
 }
 
+func TestResumeAgent_RigScopedLocalDiscovered(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, `[workspace]
+name = "test-city"
+`)
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(`[pack]
+name = "test-city"
+schema = 2
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(dir, "agents", "worker")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte("You are the worker.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte("dir = \"myrig\"\nprovider = \"codex\"\nsuspended = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+	if err := ed.ResumeAgent("myrig/worker"); err != nil {
+		t.Fatalf("ResumeAgent: %v", err)
+	}
+
+	raw := string(mustReadFile(t, path))
+	if strings.Contains(raw, "[[patches.agent]]") {
+		t.Fatalf("city.toml should not gain agent patch:\n%s", raw)
+	}
+	agentToml := string(mustReadFile(t, filepath.Join(agentDir, "agent.toml")))
+	if !strings.Contains(agentToml, `dir = "myrig"`) {
+		t.Fatalf("agent.toml = %q, want dir preserved", agentToml)
+	}
+	if !strings.Contains(agentToml, `provider = "codex"`) {
+		t.Fatalf("agent.toml = %q, want provider preserved", agentToml)
+	}
+	if strings.Contains(agentToml, "suspended") {
+		t.Fatalf("agent.toml = %q, want suspended cleared", agentToml)
+	}
+}
+
 // TestSuspendAgent_PackDeclaredAgentUsesPatch ensures that an [[agent]]
 // explicitly declared in the city's pack.toml is suspended via
 // [[patches.agent]] in city.toml — not via agents/<name>/agent.toml,
@@ -679,8 +722,9 @@ func boolPtrTest(b bool) *bool { return &b }
 // guards against the iteration-3 Major finding (Gemini): a rig-scoped
 // agent whose prompt_template happens to point at the city's
 // <cityRoot>/agents/<name>/ template must NOT be classified as local
-// discovered. Writing agent.toml for it would corrupt the city agent's
-// durable state instead of producing the correct [[patches.agent]].
+// discovered unless agent.toml declares the same rig dir. Without that
+// proof, writing agent.toml there would corrupt the city agent's durable
+// state instead of producing the correct [[patches.agent]].
 func TestLocalDiscoveredAgent_RejectsRigScopedAgentWithCityPromptPath(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "agents", "worker"), 0o755); err != nil {

@@ -139,6 +139,50 @@ func TestDoAgentResumePackDerivedError(t *testing.T) {
 	}
 }
 
+func TestDoAgentResumeRigScopedLocalDiscoveredAgent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`[workspace]
+name = "test-city"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(`[pack]
+name = "test-city"
+schema = 2
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(dir, "agents", "dusan")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte("You are Dusan.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentTomlPath := filepath.Join(agentDir, "agent.toml")
+	if err := os.WriteFile(agentTomlPath, []byte("dir = \"world-of-floorcraft\"\nsuspended = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentResume(fsys.OSFS{}, dir, "world-of-floorcraft/dusan", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	rawCity := string(mustReadFile(t, filepath.Join(dir, "city.toml")))
+	if strings.Contains(rawCity, "[[patches.agent]]") {
+		t.Fatalf("city.toml should not gain a patch for a convention agent:\n%s", rawCity)
+	}
+	agentToml := string(mustReadFile(t, agentTomlPath))
+	if !strings.Contains(agentToml, `dir = "world-of-floorcraft"`) {
+		t.Fatalf("agent.toml = %q, want dir preserved", agentToml)
+	}
+	if strings.Contains(agentToml, "suspended") {
+		t.Fatalf("agent.toml = %q, want suspended cleared", agentToml)
+	}
+}
+
 func TestLoadCityConfigFSEmitsProvenanceWarnings(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`[workspace]

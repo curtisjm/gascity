@@ -375,22 +375,19 @@ func findLocalDiscoveredAgent(fs fsys.FS, expanded *config.City, cityRoot, name 
 // precedence over agent.toml during composition. The pack-declared check
 // matches on the agent's full (Dir, Name) identity so that a city-scoped
 // discovered agent and a pack rig-scoped agent that happen to share a
-// bare Name remain distinct.
+// bare Name remain distinct. Rig-scoped convention agents are eligible
+// only when agents/<name>/agent.toml explicitly declares the same dir,
+// proving that the convention file is the durable source of that qualified
+// identity.
 func LocalDiscoveredAgent(fs fsys.FS, cityRoot string, agent config.Agent) bool {
 	if agent.BindingName != "" {
 		return false
 	}
-	// Convention discovery scans <cityRoot>/agents/<Name>/, which is
-	// strictly city-scoped (Agent.Dir == ""). A rig-scoped agent that
-	// happens to point its prompt_template at the city's agents/<name>/
-	// prompt template is a different identity and must NOT be classified
-	// as local-discovered — writing agent.toml there would corrupt the
-	// city agent's durable state.
-	if agent.Dir != "" {
-		return false
-	}
 	cityRoot = filepath.Clean(cityRoot)
 	agentDir := filepath.Join(cityRoot, "agents", agent.Name)
+	if agent.Dir != "" && !localAgentTomlDeclaresDir(fs, agentDir, agent.Dir) {
+		return false
+	}
 	switch filepath.Clean(agent.PromptTemplate) {
 	case filepath.Join(agentDir, "prompt.template.md"),
 		filepath.Join(agentDir, "prompt.md.tmpl"),
@@ -400,6 +397,20 @@ func LocalDiscoveredAgent(fs fsys.FS, cityRoot string, agent config.Agent) bool 
 		return false
 	}
 	return !agentDeclaredInCityPack(fs, cityRoot, agent.Dir, agent.Name)
+}
+
+func localAgentTomlDeclaresDir(fs fsys.FS, agentDir, wantDir string) bool {
+	data, err := fs.ReadFile(filepath.Join(agentDir, "agent.toml"))
+	if err != nil {
+		return false
+	}
+	var cfg struct {
+		Dir string `toml:"dir"`
+	}
+	if _, err := toml.Decode(string(data), &cfg); err != nil {
+		return false
+	}
+	return cfg.Dir == wantDir
 }
 
 // agentDeclaredInCityPack reports whether (dir, name) appears as an
