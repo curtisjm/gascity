@@ -227,5 +227,10 @@ func logNativeUnavailable(logger *slog.Logger, scope, gate, reason string) {
 		logger.Error(nativeUnavailableMessage, args...)
 		return
 	}
-	logger.Warn(nativeUnavailableMessage, args...)
+	// Native-store fallback is an expected compatibility path while scopes
+	// still depend on bd hooks, older provider shapes, or the subprocess bd
+	// store. The selected store and preflight gate remain available through
+	// BeadsDiagnostic; keep routine CLI stderr clean unless a caller opts into
+	// debug logging.
+	logger.Debug(nativeUnavailableMessage, args...)
 }

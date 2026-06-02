@@ -1,8 +1,10 @@
 package beads
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,6 +182,38 @@ func TestOpenStoreAtForCityNativeOpenFailureFallsBackWithDiagnostic(t *testing.T
 	}
 	if !strings.Contains(result.Diagnostic.PreflightReason, "dial native") {
 		t.Fatalf("diagnostic preflight_reason = %q, want native open error", result.Diagnostic.PreflightReason)
+	}
+}
+
+func TestOpenStoreAtForCityRoutineFallbackDoesNotWarnAtDefaultLogLevel(t *testing.T) {
+	scope := t.TempDir()
+	hooksDir := filepath.Join(scope, ".beads", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hooksDir, "on_create"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+
+	_, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		Logger:           slog.New(slog.NewTextHandler(&logs, nil)),
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore: func() (Store, error) {
+			return NewMemStore(), nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called while bd hooks are installed")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if strings.Contains(logs.String(), nativeUnavailableMessage) {
+		t.Fatalf("routine native fallback logged at default level: %s", logs.String())
 	}
 }
 
